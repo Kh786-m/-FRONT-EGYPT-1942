@@ -1,1 +1,68 @@
 
+
+name: Build WAR FRONT Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install Godot
+        run: |
+          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -q Godot_v4.3-stable_linux.x86_64.zip
+          chmod +x Godot_v4.3-stable_linux.x86_64
+
+          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          unzip -q Godot_v4.3-stable_export_templates.tpz
+
+          mkdir -p ~/.local/share/godot/export_templates/4.3.stable
+          cp templates/* ~/.local/share/godot/export_templates/4.3.stable/
+
+      - name: Configure Android export
+        run: |
+          keytool -genkeypair -keystore "$HOME/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug"
+
+          mkdir -p ~/.config/godot
+          cat > ~/.config/godot/editor_settings-4.tres <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+      - name: Build APK
+        run: |
+          mkdir -p build
+          ./Godot_v4.3-stable_linux.x86_64 --headless --path . --editor --quit
+          ./Godot_v4.3-stable_linux.x86_64 --headless --path . --export-debug "Android" build/WAR_FRONT_EGYPT_1942.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WAR-FRONT-EGYPT-1942
+          path: build/*.apk
+          if-no-files-found: error

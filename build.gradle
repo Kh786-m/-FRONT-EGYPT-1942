@@ -1,0 +1,7 @@
+plugins { id "com.android.application" }
+
+android {
+    namespace "com.warfront.egypt1942"
+    compileSdk 35
+    defaultConfig { applicationId "com.warfront.egypt1942"; minSdk 24; targetSdk 28; versionCode 1; versionName "0.1" }
+}

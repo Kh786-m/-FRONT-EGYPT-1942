@@ -1,0 +1,3 @@
+Noto Kufi Arabic — Copyright 2019-2022 Google LLC.
+Licensed under the SIL Open Font License, Version 1.1 (https://openfontlicense.org).
+Used unmodified as the game's UI / Arabic sign font.

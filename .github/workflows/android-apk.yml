@@ -24,6 +24,17 @@ jobs:
           mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
           unzip -q Godot_v4.3-stable_export_templates.tpz -d /tmp/godot-templates
           cp /tmp/godot-templates/templates/* "$HOME/.local/share/godot/export_templates/4.3.stable/"
+      - name: Smoke test (headless, QA bot plays both missions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path . --editor --quit || true
+          for scene in scenes/missions/m01_alamein_outpost.tscn scenes/maps/m02_alexandria_harbor.tscn; do
+            out=$(godot --headless --path . "$scene" --fixed-fps 30 --quit-after 5400 -- --qa-bot --report 2>&1 || true)
+            echo "$out" | grep -E "REPORT|SCRIPT ERROR" || true
+            if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in $scene"; exit 1; fi
+            grep -q "over=true" <<<"$out" || { echo "Mission did not finish: $scene"; exit 1; }
+          done
       - name: Install Android SDK
         uses: android-actions/setup-android@v3
       - name: Set Java 17

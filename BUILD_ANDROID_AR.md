@@ -1,11 +1,4 @@
-# إنشاء APK من الهاتف عبر GitHub Actions
+# بناء APK
 
-هذا مشروع Godot 4.3 ثلاثي الأبعاد أولي، وليس لعبة PUBG مكتملة. لم يُختبر البناء بعد.
-
-1. أنشئ مستودع GitHub جديدًا أو استخدم فرعًا نظيفًا للمشروع. لا تخلط ملفات مشروع Android WebView القديم مع مشروع Godot.
-2. ارفع **محتويات** مجلد WAR_FRONT_EGYPT_1942_Godot3D إلى جذر المستودع، مع الحفاظ على المسارات بما فيها `.github/workflows/android-apk.yml`.
-3. افتح Actions ثم Build Godot 3D Android APK ثم Run workflow.
-4. عند نجاح المهمة نزّل ملف Artifact باسم WAR_FRONT_EGYPT_1942_Godot3D_APK وفك ضغطه لتحصل على APK تجريبي.
-5. إذا فشل البناء، أرسل سجل الخطأ لمراجعته. لم يُضمن نجاح التصدير دون اختبار فعلي.
-
-ملاحظة: قد يمنع GitHub الرفع الكامل للمجلدات من متصفح الهاتف. يمكن استخدام Codespaces أو تطبيق Git مناسب لرفع بنية المجلدات. إصدار APK التجريبي للتجربة فقط.
+الطريقة الحالية للبناء موجودة في [README_BUILD_ON_PHONE_AR.md](README_BUILD_ON_PHONE_AR.md):
+GitHub Actions بيبني تلقائيًا مع كل push على `main`، والناتج Artifact باسم `haraq-debug-apk`.

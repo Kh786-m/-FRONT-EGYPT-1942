@@ -1,7 +1,9 @@
 extends CharacterBody3D
 ## Simple enemy soldier AI: patrol -> detect (range + line of sight) -> chase -> shoot (hitscan).
+## Also respects the shrinking zone: patrols relocate inside the next circle and soldiers
+## caught outside run back in (and take zone damage like the player).
 
-signal died(enemy: CharacterBody3D)
+signal died(enemy: CharacterBody3D, by_player: bool)
 
 enum State { PATROL, CHASE }
 
@@ -16,9 +18,10 @@ const DAMAGE := 6
 const BASE_HIT_CHANCE := 0.55
 const GRAVITY := 24.0
 const EYE_HEIGHT := 1.55
+const MAX_HP := 100.0
 
 var game: Node3D
-var hit_points := 3
+var hit_points := MAX_HP
 var origin := Vector3.ZERO
 var patrol_axis := Vector3.RIGHT
 var patrol_phase := 0.0
@@ -78,16 +81,31 @@ func _add_box(pos: Vector3, size: Vector3, mat: Material) -> void:
 
 
 ## Called by the player's weapon. Returns true if this hit killed the enemy.
-func take_hit(damage: int) -> bool:
-	if hit_points <= 0:
+func take_hit(damage: float) -> bool:
+	if hit_points <= 0.0:
 		return false
 	hit_points -= damage
 	alert()
-	if hit_points <= 0:
-		died.emit(self)
-		queue_free()
+	if hit_points <= 0.0:
+		_die(true)
 		return true
 	return false
+
+
+## Damage from standing outside the zone. Returns true if it killed the soldier.
+func take_zone_damage(damage: float) -> bool:
+	if hit_points <= 0.0:
+		return false
+	hit_points -= damage
+	if hit_points <= 0.0:
+		_die(false)
+		return true
+	return false
+
+
+func _die(by_player: bool) -> void:
+	died.emit(self, by_player)
+	queue_free()
 
 
 func alert() -> void:
@@ -116,16 +134,23 @@ func _physics_process(delta: float) -> void:
 		_can_see = dist < DETECT_RANGE and _has_line_of_sight(player)
 	var move_dir := Vector3.ZERO
 	var speed := 0.0
+	var zone: Node3D = game.zone
+	var outside_zone: bool = zone != null and not zone.is_inside(global_position)
+	# Keep the patrol post inside the circle the zone is closing toward.
+	if zone != null and Vector2(origin.x, origin.z).distance_to(zone.target_center) > zone.target_radius * 0.85:
+		origin = zone.random_point_in_target()
+	if outside_zone and not (state == State.CHASE and _can_see and dist < ATTACK_RANGE):
+		state = State.PATROL
 	match state:
 		State.PATROL:
-			if _can_see:
+			if _can_see and not outside_zone:
 				alert()
 			var goal := origin + patrol_axis * sin(_clock * 0.5 + patrol_phase) * 3.0
 			var to_goal := goal - global_position
 			to_goal.y = 0.0
 			if to_goal.length() > 0.2:
 				move_dir = to_goal.normalized()
-				speed = PATROL_SPEED if to_goal.length() < 4.0 else CHASE_SPEED * 0.7
+				speed = CHASE_SPEED if outside_zone else (PATROL_SPEED if to_goal.length() < 4.0 else CHASE_SPEED * 0.7)
 		State.CHASE:
 			if _can_see:
 				_last_known = player.global_position

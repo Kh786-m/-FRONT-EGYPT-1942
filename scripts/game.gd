@@ -3,6 +3,10 @@ extends Node3D
 ## Fully procedural offline FPS vertical slice (Godot 4.3, GL Compatibility).
 
 const EnemyScript := preload("res://scripts/enemy.gd")
+const ZoneScript := preload("res://scripts/zone.gd")
+const LootScript := preload("res://scripts/loot.gd")
+const MinimapScript := preload("res://scripts/minimap.gd")
+const Weapons := preload("res://scripts/weapons.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
 # HARAQ palette
@@ -23,8 +27,14 @@ const TOUCH_SENS := 0.0035
 const HIP_FOV := 75.0
 const ADS_FOV := 48.0
 const GUN_HIP_POS := Vector3(0.3, -0.3, -0.95)
-const GUN_ADS_POS := Vector3(0.16, -0.24, -0.82)
-const ENEMY_COUNT := 12
+const GUN_ADS_POS := Vector3(0.0, -0.13, -0.62)
+const ENEMY_COUNT := 20
+const LOOT_CRATE_COUNT := 34
+const MAX_ARMOR := 100.0
+const ARMOR_ABSORB := 0.6
+const MAX_MEDKITS := 3
+const MEDKIT_HEAL := 50.0
+const SWITCH_TIME := 0.45
 const MAX_HEALTH := 100
 const REGEN_DELAY := 5.0
 const REGEN_RATE := 4.0
@@ -36,7 +46,16 @@ var state := GameState.INTRO
 var player: CharacterBody3D
 var head: Node3D
 var camera: Camera3D
-var gun: MeshInstance3D
+var gun: Node3D
+var zone: Node3D
+var minimap: Control
+var zone_label: Label
+var weapon_label: Label
+var pickup_label: Label
+var alive_label: Label
+var interact_button: Button
+var swap_button: Button
+var heal_button: Button
 var hud: Label
 var status: Label
 var health_label: Label
@@ -67,9 +86,23 @@ var obstacles: Array[AABB] = []
 var recoil := 0.0
 var health := float(MAX_HEALTH)
 var since_damage := 99.0
-var ammo := 30
-var reserve_ammo := 150
-var magazine_size := 30
+## Two weapon slots ("" = empty). Rounds in each weapon's magazine are tracked per weapon id,
+## reserve ammo per ammo type (see weapons.gd).
+var slots: Array[String] = ["webley", ""]
+var current_slot := 0
+var mag_ammo := {"webley": 6}
+var reserve := {"pistol": 24, "rifle": 0, "smg": 0}
+var armor := 0.0
+var medkits := 0
+var switch_timer := 0.0
+var trigger_released := true
+var loot_crates: Array[Node3D] = []
+var nearby_crate: Node3D = null
+var loot_rng := RandomNumberGenerator.new()
+var placement := 0
+var zone_kills := 0
+var pickup_toast := ""
+var pickup_toast_timer := 0.0
 var reload_timer := 0.0
 var aiming := false
 var hit_marker_timer := 0.0
@@ -83,6 +116,8 @@ func _ready() -> void:
 	_create_world()
 	_create_egyptian_life()
 	_create_player()
+	_create_zone()
+	_create_loot()
 	_create_enemies()
 	_create_ui()
 	_create_muzzle_flash()
@@ -209,23 +244,26 @@ func _create_player() -> void:
 	camera.fov = HIP_FOV
 	camera.near = 0.03
 	head.add_child(camera)
-	gun = MeshInstance3D.new()
-	var weapon := BoxMesh.new()
-	weapon.size = Vector3(0.18, 0.22, 0.85)
-	gun.mesh = weapon
-	gun.material_override = material(INK.lerp(KHAKI, 0.2), 0.45)
+	gun = Node3D.new()
 	gun.position = GUN_HIP_POS
 	camera.add_child(gun)
-	var barrel := MeshInstance3D.new()
-	var cylinder := CylinderMesh.new()
-	cylinder.top_radius = 0.045
-	cylinder.bottom_radius = 0.045
-	cylinder.height = 0.65
-	barrel.mesh = cylinder
-	barrel.rotation_degrees.x = 90
-	barrel.position = Vector3(0, -0.015, -0.57)
-	barrel.material_override = material(INK, 0.4)
-	gun.add_child(barrel)
+	_rebuild_gun_model()
+
+
+func current_weapon() -> String:
+	return slots[current_slot]
+
+
+func current_stats() -> Dictionary:
+	return Weapons.get_weapon(current_weapon())
+
+
+func _rebuild_gun_model() -> void:
+	for c in gun.get_children():
+		gun.remove_child(c)
+		c.queue_free()
+	if current_weapon() != "":
+		Weapons.build_model(current_weapon(), gun, 0.8)
 
 
 func _create_muzzle_flash() -> void:
@@ -238,15 +276,174 @@ func _create_muzzle_flash() -> void:
 
 
 func _reload() -> void:
-	if reload_timer > 0.0 or ammo >= magazine_size or reserve_ammo <= 0:
+	var w := current_stats()
+	if w.is_empty() or reload_timer > 0.0 or switch_timer > 0.0:
 		return
-	reload_timer = 1.8
+	var id := current_weapon()
+	if int(mag_ammo.get(id, 0)) >= int(w["mag"]) or int(reserve.get(w["ammo"], 0)) <= 0:
+		return
+	reload_timer = float(w["reload"])
 
 
 func _finish_reload() -> void:
-	var count := mini(magazine_size - ammo, reserve_ammo)
-	ammo += count
-	reserve_ammo -= count
+	var w := current_stats()
+	if w.is_empty():
+		return
+	var id := current_weapon()
+	var have := int(mag_ammo.get(id, 0))
+	var count := mini(int(w["mag"]) - have, int(reserve.get(w["ammo"], 0)))
+	mag_ammo[id] = have + count
+	reserve[w["ammo"]] = int(reserve[w["ammo"]]) - count
+
+
+## Select weapon slot 0/1 (ignored if that slot is empty).
+func switch_to_slot(slot: int) -> void:
+	if slot == current_slot or slot < 0 or slot >= slots.size() or slots[slot] == "":
+		return
+	current_slot = slot
+	reload_timer = 0.0
+	switch_timer = SWITCH_TIME
+	aiming = false
+	_rebuild_gun_model()
+	gun.position = GUN_HIP_POS + Vector3(0, -0.35, 0)
+
+
+func swap_weapon() -> void:
+	switch_to_slot(1 - current_slot)
+
+
+func use_medkit() -> void:
+	if medkits <= 0 or health >= MAX_HEALTH or state != GameState.PLAYING:
+		return
+	medkits -= 1
+	health = minf(MAX_HEALTH, health + MEDKIT_HEAL)
+	_toast("+%d HP  إسعاف" % int(MEDKIT_HEAL))
+
+
+func _toast(text: String) -> void:
+	pickup_toast = text
+	pickup_toast_timer = 2.2
+
+
+## Give the player a weapon. Fills an empty slot, otherwise replaces the held weapon
+## (the old one is dropped in a small crate). Returns true if taken.
+func give_weapon(id: String, allow_replace := true) -> bool:
+	if id == "" or not Weapons.DATA.has(id):
+		return false
+	var w: Dictionary = Weapons.DATA[id]
+	if id in slots:
+		# Duplicate weapon: convert it into ammo for that weapon.
+		var t: String = w["ammo"]
+		reserve[t] = mini(int(Weapons.AMMO_MAX[t]), int(reserve.get(t, 0)) + int(w["mag"]))
+		_toast("+%d %s" % [int(w["mag"]), Weapons.AMMO_NAMES[t]])
+		return true
+	var empty := slots.find("")
+	if empty != -1:
+		slots[empty] = id
+		mag_ammo[id] = int(w["mag"])
+		switch_to_slot(empty)
+		_toast("%s  %s" % [w["name"], w["name_ar"]])
+		return true
+	if not allow_replace:
+		return false
+	var old := current_weapon()
+	slots[current_slot] = id
+	mag_ammo[id] = int(w["mag"])
+	if old != "":
+		var drop_contents := {"weapon": old, "ammo": {}, "medkits": 0, "armor": 0.0}
+		var left := int(mag_ammo.get(old, 0))
+		if left > 0:
+			drop_contents["ammo"][Weapons.DATA[old]["ammo"]] = left
+		mag_ammo.erase(old)
+		_spawn_crate(player.global_position + player.global_transform.basis.z * 1.8, drop_contents, true)
+	reload_timer = 0.0
+	switch_timer = SWITCH_TIME
+	_rebuild_gun_model()
+	_toast("%s  %s" % [w["name"], w["name_ar"]])
+	return true
+
+
+## Take everything that can be auto-collected from a crate. A weapon is only auto-taken
+## if there is a free slot (or it is a duplicate); otherwise E / INTERACT swaps it in.
+func _collect_from(crate: Node3D, interact: bool) -> void:
+	var c: Dictionary = crate.contents
+	var got: PackedStringArray = []
+	var ammo: Dictionary = c.get("ammo", {})
+	for t in ammo.keys():
+		var cap := int(Weapons.AMMO_MAX.get(t, 999))
+		var have := int(reserve.get(t, 0))
+		var take := mini(int(ammo[t]), cap - have)
+		if take > 0:
+			reserve[t] = have + take
+			got.append("+%d %s" % [take, Weapons.AMMO_NAMES.get(t, t)])
+			ammo[t] = int(ammo[t]) - take
+		if int(ammo[t]) <= 0:
+			ammo.erase(t)
+	if int(c.get("medkits", 0)) > 0 and medkits < MAX_MEDKITS:
+		var take_m := mini(int(c["medkits"]), MAX_MEDKITS - medkits)
+		medkits += take_m
+		c["medkits"] = int(c["medkits"]) - take_m
+		got.append("+%d MEDKIT" % take_m)
+	if float(c.get("armor", 0.0)) > 0.0 and armor < MAX_ARMOR:
+		var take_a := minf(float(c["armor"]), MAX_ARMOR - armor)
+		armor += take_a
+		c["armor"] = float(c["armor"]) - take_a
+		got.append("+%d ARMOR" % int(take_a))
+	var w: String = c.get("weapon", "")
+	if w != "" and (interact or "" in slots or w in slots):
+		if give_weapon(w, interact):
+			crate.take_weapon()
+	if not got.is_empty():
+		_toast("  ".join(got))
+	crate.refresh_label()
+	if crate.is_empty():
+		loot_crates.erase(crate)
+		crate.queue_free()
+		if nearby_crate == crate:
+			nearby_crate = null
+
+
+func interact() -> void:
+	if state == GameState.PLAYING and nearby_crate != null and is_instance_valid(nearby_crate):
+		_collect_from(nearby_crate, true)
+
+
+func _spawn_crate(pos: Vector3, contents: Dictionary, small := false) -> Node3D:
+	var crate: Node3D = LootScript.new()
+	add_child(crate)
+	crate.position = Vector3(pos.x, 0.0, pos.z)
+	crate.rotation.y = loot_rng.randf() * TAU
+	crate.setup(contents, small)
+	loot_crates.append(crate)
+	return crate
+
+
+func _create_loot() -> void:
+	loot_rng.randomize()
+	var placed := 0
+	var tries := 0
+	while placed < LOOT_CRATE_COUNT and tries < 600:
+		tries += 1
+		var p := Vector3(loot_rng.randf_range(-78, 78), 0.0, loot_rng.randf_range(-78, 78))
+		if not _spawn_point_clear(p):
+			continue
+		var too_close := false
+		for c in loot_crates:
+			if c.position.distance_to(p) < 9.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+		_spawn_crate(p, LootScript.roll_map_crate(loot_rng))
+		placed += 1
+	# A guaranteed starter crate near the spawn so the loop is obvious.
+	_spawn_crate(Vector3(3.5, 0, 8.5), {"weapon": "thompson", "ammo": {"smg": 60}, "medkits": 1, "armor": 0.0})
+
+
+func _create_zone() -> void:
+	zone = ZoneScript.new()
+	zone.name = "Zone"
+	add_child(zone)
 
 
 func _toggle_aim() -> void:
@@ -270,14 +467,14 @@ func _create_enemies() -> void:
 	ember_mat.albedo_color = EMBER
 	for i in range(ENEMY_COUNT):
 		var angle := i * TAU / float(ENEMY_COUNT)
-		var radius := 20.0 + float(i % 4) * 7.0
+		var radius := 18.0 + float(i % 5) * 12.0
 		var p := Vector3(sin(angle) * radius, 0.05, cos(angle) * radius)
 		# Push the spawn outward/inward until it is not inside a building or rock.
 		var tries := 0
 		while not _spawn_point_clear(p) and tries < 40:
 			tries += 1
 			var r := radius + (1.5 * tries if tries % 2 == 0 else -1.2 * tries)
-			r = clampf(r, 14.0, 70.0)
+			r = clampf(r, 14.0, 76.0)
 			p = Vector3(sin(angle + tries * 0.05) * r, 0.05, cos(angle + tries * 0.05) * r)
 		var enemy: CharacterBody3D = EnemyScript.new()
 		enemy.name = "Enemy%d" % i
@@ -288,23 +485,49 @@ func _create_enemies() -> void:
 		enemies.append(enemy)
 
 
-func _on_enemy_died(enemy: CharacterBody3D) -> void:
+func _on_enemy_died(enemy: CharacterBody3D, by_player: bool) -> void:
 	enemies.erase(enemy)
-	score += 1
-	experience_points += 25
-	reward_coins += 10
+	if by_player:
+		score += 1
+		experience_points += 25
+		reward_coins += 10
+	else:
+		zone_kills += 1
+	# Fallen soldiers leave a small supply drop.
+	_spawn_crate(enemy.global_position, LootScript.roll_enemy_drop(loot_rng), true)
 	if enemies.is_empty() and state == GameState.PLAYING:
 		_end_mission(true)
 
 
-func damage_player(amount: int, _from_pos: Vector3) -> void:
+## Damage from enemy fire. Armour soaks part of it while it lasts.
+func damage_player(amount: float, _from_pos: Vector3) -> void:
 	if state != GameState.PLAYING:
 		return
-	health = maxf(0.0, health - float(amount))
+	var dmg := float(amount)
+	if armor > 0.0:
+		var soaked := minf(armor, dmg * ARMOR_ABSORB)
+		armor -= soaked
+		dmg -= soaked
+	_apply_player_damage(dmg, 0.45)
+
+
+## Zone damage ignores armour.
+func damage_player_zone(amount: float) -> void:
+	if state != GameState.PLAYING:
+		return
+	_apply_player_damage(amount, 0.25)
+
+
+func _apply_player_damage(dmg: float, flash: float) -> void:
+	health = maxf(0.0, health - dmg)
 	since_damage = 0.0
-	damage_flash.color.a = 0.45
+	damage_flash.color.a = maxf(damage_flash.color.a, flash)
 	if health <= 0.0:
 		_end_mission(false)
+
+
+func alive_count() -> int:
+	return enemies.size() + (1 if state != GameState.DEAD else 0)
 
 
 func _label(parent: Control, text: String, font_size: int, color: Color = BONE, centered := false) -> Label:
@@ -370,10 +593,48 @@ func _create_ui() -> void:
 	health_label.position = Vector2(20, 48)
 	health_label.add_theme_font_size_override("font_size", 26)
 	root.add_child(health_label)
+	weapon_label = Label.new()
+	weapon_label.position = Vector2(20, 88)
+	weapon_label.add_theme_font_size_override("font_size", 20)
+	weapon_label.add_theme_color_override("font_color", SAND)
+	root.add_child(weapon_label)
 	status = Label.new()
-	status.position = Vector2(20, 88)
-	status.add_theme_font_size_override("font_size", 19)
+	status.position = Vector2(20, 166)
+	status.add_theme_font_size_override("font_size", 17)
+	status.add_theme_color_override("font_color", Color(BONE, 0.85))
 	root.add_child(status)
+	# Top-right: alive counter, minimap and zone status.
+	alive_label = Label.new()
+	alive_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	alive_label.position = Vector2(-215, 8)
+	alive_label.size = Vector2(200, 34)
+	alive_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	alive_label.add_theme_font_size_override("font_size", 22)
+	alive_label.add_theme_color_override("font_color", BRASS)
+	root.add_child(alive_label)
+	minimap = MinimapScript.new()
+	minimap.game = self
+	minimap.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	minimap.position = Vector2(-195, 46)
+	minimap.size = Vector2(180, 180)
+	minimap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(minimap)
+	zone_label = Label.new()
+	zone_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	zone_label.position = Vector2(-560, 230)
+	zone_label.size = Vector2(545, 70)
+	zone_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	zone_label.add_theme_font_size_override("font_size", 19)
+	root.add_child(zone_label)
+	pickup_label = Label.new()
+	pickup_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+	pickup_label.position = Vector2(-400, -300)
+	pickup_label.size = Vector2(800, 80)
+	pickup_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pickup_label.add_theme_font_size_override("font_size", 21)
+	pickup_label.add_theme_color_override("font_color", BONE)
+	pickup_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(pickup_label)
 	var cross := Label.new()
 	cross.text = "+"
 	cross.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
@@ -416,8 +677,14 @@ func _create_ui() -> void:
 	reload_button.pressed.connect(_reload)
 	aim_button = _button(root, "AIM", Vector2(-155, -265), Vector2(125, 65))
 	aim_button.pressed.connect(_toggle_aim)
+	swap_button = _button(root, "SWAP", Vector2(-295, -275), Vector2(125, 65))
+	swap_button.pressed.connect(swap_weapon)
+	interact_button = _button(root, "التقط", Vector2(-430, -200), Vector2(125, 65))
+	interact_button.pressed.connect(interact)
+	heal_button = _button(root, "HEAL", Vector2(-430, -275), Vector2(125, 65))
+	heal_button.pressed.connect(use_medkit)
 	# Touch controls only make sense on phones/tablets.
-	for c in [joy_base, fire_button, jump_button, sprint_button, reload_button, aim_button]:
+	for c in [joy_base, fire_button, jump_button, sprint_button, reload_button, aim_button, swap_button, interact_button, heal_button]:
 		c.visible = is_mobile
 
 
@@ -440,8 +707,22 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_look(event.relative * MOUSE_SENS)
-	if event is InputEventKey and event.pressed and event.keycode == KEY_R:
-		_reload()
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_R:
+				_reload()
+			KEY_E, KEY_F:
+				interact()
+			KEY_1:
+				switch_to_slot(0)
+			KEY_2:
+				switch_to_slot(1)
+			KEY_Q:
+				swap_weapon()
+			KEY_H:
+				use_medkit()
+	if event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+		swap_weapon()
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 		_toggle_aim()
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
@@ -511,6 +792,12 @@ func _physics_process(delta: float) -> void:
 	since_damage += delta
 	if since_damage > REGEN_DELAY and health < MAX_HEALTH:
 		health = minf(MAX_HEALTH, health + REGEN_RATE * delta)
+	_update_zone(delta)
+	if state != GameState.PLAYING:
+		return
+	_update_loot_proximity()
+	pickup_toast_timer = maxf(0.0, pickup_toast_timer - delta)
+	switch_timer = maxf(0.0, switch_timer - delta)
 	cooldown = maxf(0.0, cooldown - delta)
 	if reload_timer > 0.0:
 		reload_timer -= delta
@@ -521,38 +808,101 @@ func _physics_process(delta: float) -> void:
 	shot_flash.light_energy = move_toward(shot_flash.light_energy, 0.0, delta * 45.0)
 	camera.fov = move_toward(camera.fov, ADS_FOV if aiming else HIP_FOV, delta * 180.0)
 	# Mouse "fire" is also emulated from touches on phones, so only the FIRE button shoots there.
-	if fire_held or (not is_mobile and Input.is_action_pressed("fire")):
+	var trigger := fire_held or (not is_mobile and Input.is_action_pressed("fire"))
+	if trigger:
 		_shoot()
+	else:
+		trigger_released = true
 	recoil = move_toward(recoil, 0.0, delta * 3.0)
 	var gun_target := (GUN_ADS_POS if aiming else GUN_HIP_POS) + Vector3(0, recoil, -recoil * 1.2)
 	gun.position = gun.position.lerp(gun_target, clampf(delta * 12.0, 0.0, 1.0))
 	_update_hud()
 
 
+func _update_zone(delta: float) -> void:
+	zone.tick(delta)
+	var dps: float = zone.damage_per_second()
+	for e in enemies.duplicate():
+		if is_instance_valid(e) and not zone.is_inside(e.global_position):
+			e.take_zone_damage(dps * delta)
+	if not zone.is_inside(player.global_position):
+		damage_player_zone(dps * delta)
+
+
+func _update_loot_proximity() -> void:
+	nearby_crate = null
+	var best := LootScript.PICKUP_RADIUS
+	var pp := player.global_position
+	for c in loot_crates.duplicate():
+		if not is_instance_valid(c):
+			continue
+		var d := Vector2(c.global_position.x - pp.x, c.global_position.z - pp.z).length()
+		if d < best:
+			best = d
+			nearby_crate = c
+	if nearby_crate != null:
+		_collect_from(nearby_crate, false)
+
+
 func _update_hud() -> void:
 	var hp := int(ceil(health))
-	health_label.text = "HP %d / %d" % [hp, MAX_HEALTH]
+	health_label.text = "HP %d / %d   ARMOR %d   MEDKIT %d" % [hp, MAX_HEALTH, int(armor), medkits]
 	health_label.add_theme_color_override("font_color", EMBER if hp <= 35 else BONE)
-	var reload_text := "  RELOADING..." if reload_timer > 0.0 else ""
-	status.text = "ENEMIES %d/%d | AMMO %d/%d%s | XP %d | COINS %d | FPS %d" % [enemies.size(), ENEMY_COUNT, ammo, reserve_ammo, reload_text, experience_points, reward_coins, Engine.get_frames_per_second()]
+	var lines: PackedStringArray = []
+	for i in range(slots.size()):
+		var id := slots[i]
+		var mark := ">" if i == current_slot else " "
+		if id == "":
+			lines.append("%s[%d] —" % [mark, i + 1])
+			continue
+		var w: Dictionary = Weapons.DATA[id]
+		lines.append("%s[%d] %s   %d / %d %s" % [mark, i + 1, w["name"], int(mag_ammo.get(id, 0)), int(reserve.get(w["ammo"], 0)), Weapons.AMMO_NAMES[w["ammo"]]])
+	if reload_timer > 0.0:
+		lines[current_slot] += "   RELOADING..."
+	weapon_label.text = "\n".join(lines)
+	status.text = "KILLS %d | XP %d | COINS %d | FPS %d" % [score, experience_points, reward_coins, Engine.get_frames_per_second()]
+	alive_label.text = "ALIVE %d  |  أحياء" % alive_count()
+	var zone_text: String = zone.status_text()
+	var outside: float = zone.distance_outside(player.global_position)
+	if outside > 0.0:
+		zone_text += "\nإنت برا المنطقة! ارجع للدايرة  %dم  (-%d HP/s)" % [ceili(outside), ceili(zone.damage_per_second())]
+		zone_label.add_theme_color_override("font_color", EMBER)
+	else:
+		zone_label.add_theme_color_override("font_color", EMBER if zone.shrinking else BONE)
+	zone_label.text = zone_text
+	var prompt := ""
+	if nearby_crate != null and is_instance_valid(nearby_crate) and nearby_crate.contents.get("weapon", "") != "":
+		var wid: String = nearby_crate.contents["weapon"]
+		prompt = "%s  —  اضغط %s للتبديل" % [Weapons.DATA[wid]["name"], "التقط" if is_mobile else "E"]
+	if pickup_toast_timer > 0.0:
+		prompt = pickup_toast + ("\n" + prompt if prompt != "" else "")
+	pickup_label.text = prompt
 
 
 func _shoot() -> void:
-	if cooldown > 0 or reload_timer > 0:
+	var w := current_stats()
+	if w.is_empty() or cooldown > 0 or reload_timer > 0 or switch_timer > 0:
 		return
-	if ammo <= 0:
+	if not bool(w["auto"]) and not trigger_released:
+		return
+	trigger_released = false
+	var id := current_weapon()
+	if int(mag_ammo.get(id, 0)) <= 0:
 		_reload()
 		return
-	ammo -= 1
+	mag_ammo[id] = int(mag_ammo[id]) - 1
 	shot_flash.light_energy = 3.5
-	cooldown = 0.14
-	recoil = -0.05
+	cooldown = float(w["interval"])
+	recoil = -float(w["recoil"])
 	# Gunfire is loud: nearby patrols come looking.
 	for e in enemies:
 		if is_instance_valid(e) and e.global_position.distance_to(player.global_position) < SHOT_ALERT_RADIUS:
 			e.alert()
 	var origin := camera.global_position
-	var end := origin - camera.global_transform.basis.z * 180.0
+	var spread: float = float(w["spread"]) * (0.25 if aiming else 1.0) * (1.6 if is_player_moving_fast() else 1.0)
+	var cam_basis := camera.global_transform.basis
+	var dir := (-cam_basis.z + cam_basis.x * randf_range(-spread, spread) + cam_basis.y * randf_range(-spread, spread)).normalized()
+	var end := origin + dir * 180.0
 	var query := PhysicsRayQueryParameters3D.create(origin, end)
 	query.exclude = [player.get_rid()]
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
@@ -563,7 +913,7 @@ func _shoot() -> void:
 		hit_marker_timer = 0.14
 		# Headshots (top of the capsule) drop a soldier instantly.
 		var headshot: bool = result.position.y > (hit as Node3D).global_position.y + 1.45
-		hit.take_hit(3 if headshot else 1)
+		hit.take_hit(float(w["damage"]) * (float(w["head_mult"]) if headshot else 1.0))
 
 
 func _restart() -> void:
@@ -571,6 +921,7 @@ func _restart() -> void:
 
 
 func _end_mission(victory: bool) -> void:
+	placement = 1 if victory else enemies.size() + 1
 	state = GameState.WON if victory else GameState.DEAD
 	fire_held = false
 	sprint_held = false
@@ -588,9 +939,9 @@ func _end_mission(victory: bool) -> void:
 	box_layout.alignment = BoxContainer.ALIGNMENT_CENTER
 	box_layout.add_theme_constant_override("separation", 22)
 	end_overlay.add_child(box_layout)
-	_label(box_layout, "النصر!  VICTORY" if victory else "K.I.A  |  سقطت في المعركة", 64, BRASS if victory else EMBER, true)
-	_label(box_layout, "تم تطهير المنطقة — العلمين 1942" if victory else "الدورية أسقطتك. حاول مرة أخرى", 26, BONE, true)
-	_label(box_layout, ("All %d enemy soldiers are down" % ENEMY_COUNT) if victory else ("You were taken down — %d enemies remain" % enemies.size()), 24, BONE, true)
+	_label(box_layout, "#1  النصر!  VICTORY" if victory else "#%d  |  سقطت في المعركة" % placement, 64, BRASS if victory else EMBER, true)
+	_label(box_layout, "آخر واحد واقف — العلمين 1942" if victory else "المركز #%d من %d — حاول مرة أخرى" % [placement, ENEMY_COUNT + 1], 26, BONE, true)
+	_label(box_layout, ("Last one standing — all %d soldiers are down (%d lost to the zone)" % [ENEMY_COUNT, zone_kills]) if victory else ("Placed #%d of %d — %d enemies remain" % [placement, ENEMY_COUNT + 1, enemies.size()]), 24, BONE, true)
 	_label(box_layout, "KILLS %d   |   XP %d   |   COINS %d   |   TIME %d:%02d" % [score, experience_points, reward_coins, floori(mission_time / 60.0), int(mission_time) % 60], 22, SAND, true)
 	var restart := Button.new()
 	restart.text = "إعادة المهمة  |  RESTART"
@@ -699,10 +1050,10 @@ func _create_hero_intro() -> void:
 	hero.add_theme_color_override("font_color", SAND)
 	content.add_child(hero)
 	_label(content, "قائد المهمة | العلمين - مصر 1942", 21)
-	_label(content, "نسخة تجريبية: 12 دورية معادية تطاردك وتطلق النار — أسقطها كلها", 21)
-	_label(content, "Mission: eliminate all 12 enemy patrols — they hunt you and shoot back", 20, SAND)
+	_label(content, "باتل رويال: 20 جندي، صناديق إمداد، والدايرة بتضيق — آخر واحد واقف يكسب", 21)
+	_label(content, "Battle royale vs 20 soldiers — loot crates, shrinking zone, last one standing wins", 20, SAND)
 	var controls := Label.new()
-	controls.text = "Touch: stick + drag to look, FIRE / AIM / RELOAD" if is_mobile else "WASD move · Mouse look · LMB fire · RMB aim · R reload · Shift run · Space jump"
+	controls.text = "Touch: stick + drag to look, FIRE / AIM / RELOAD / SWAP / PICK UP / HEAL" if is_mobile else "WASD · Mouse · RMB aim · R reload · E pick up · 1/2/wheel swap · H heal"
 	controls.add_theme_font_size_override("font_size", 17)
 	controls.add_theme_color_override("font_color", Color(BONE, 0.7))
 	content.add_child(controls)

@@ -59,7 +59,7 @@ func _ready() -> void:
 	var ring := CylinderMesh.new()
 	ring.top_radius = 1.0
 	ring.bottom_radius = 1.0
-	ring.height = 0.6
+	ring.height = 3.0
 	ring.radial_segments = 96
 	ring.rings = 1
 	ring.cap_top = false
@@ -130,7 +130,7 @@ func _update_visuals() -> void:
 	_wall.position = Vector3(center.x, WALL_HEIGHT * 0.5 - 2.0, center.y)
 	_wall.scale = Vector3(radius, 1.0, radius)
 	_target_ring.visible = not finished and target_radius < radius - 0.5
-	_target_ring.position = Vector3(target_center.x, 0.25, target_center.y)
+	_target_ring.position = Vector3(target_center.x, 0.0, target_center.y)
 	_target_ring.scale = Vector3(target_radius, 1.0, target_radius)
 
 

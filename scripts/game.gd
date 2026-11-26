@@ -1,12 +1,17 @@
 extends Node3D
 ## HARAQ (حَرَق) — WAR FRONT: EGYPT 1942
-## Fully procedural offline FPS vertical slice (Godot 4.3, GL Compatibility).
+## Procedural offline battle royale (Godot 4.3, GL Compatibility renderer for the widest
+## Android support). v0.4: PBR desert terrain, Mediterranean coast, atmosphere, quality presets.
 
 const EnemyScript := preload("res://scripts/enemy.gd")
 const ZoneScript := preload("res://scripts/zone.gd")
 const LootScript := preload("res://scripts/loot.gd")
 const MinimapScript := preload("res://scripts/minimap.gd")
 const Weapons := preload("res://scripts/weapons.gd")
+const G := preload("res://scripts/graphics.gd")
+const Terrain := preload("res://scripts/terrain.gd")
+const Props := preload("res://scripts/props.gd")
+const Fx := preload("res://scripts/fx.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
 # HARAQ palette
@@ -108,11 +113,21 @@ var aiming := false
 var hit_marker_timer := 0.0
 var mission_time := 0.0
 var is_mobile := false
+var quality := 1
+var world_env: WorldEnvironment
+var sun: DirectionalLight3D
+var bushes: MultiMeshInstance3D
+var bush_total := 0
+var smoke_plumes: Array[Node3D] = []
+var player_flash: MeshInstance3D
+var flash_timer := 0.0
+var quality_buttons: Array[Button] = []
 
 
 func _ready() -> void:
 	randomize()
 	is_mobile = OS.has_feature("mobile")
+	quality = G.load_quality()
 	_create_world()
 	_create_egyptian_life()
 	_create_player()
@@ -122,6 +137,7 @@ func _ready() -> void:
 	_create_ui()
 	_create_muzzle_flash()
 	_create_hero_intro()
+	apply_quality(quality)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if "--autostart" in OS.get_cmdline_user_args():
 		_start_hero_mission()
@@ -142,7 +158,11 @@ func material(color: Color, rough: float = 0.95) -> StandardMaterial3D:
 	return m
 
 
-func box(parent: Node3D, pos: Vector3, size: Vector3, mat: Material, solid := true) -> Node3D:
+func box(parent: Node3D, pos: Vector3, size: Vector3, mat: Material, solid := true, on_ground := true) -> Node3D:
+	var register := parent == self and size.y < 50.0 and pos.y > -0.5
+	if parent == self and on_ground:
+		# Sit the box on the dunes: sink it to the lowest point under its footprint.
+		pos.y += Terrain.footprint_min(pos, size) - 0.12
 	var root: Node3D = StaticBody3D.new() if solid else Node3D.new()
 	parent.add_child(root)
 	root.position = pos
@@ -158,41 +178,73 @@ func box(parent: Node3D, pos: Vector3, size: Vector3, mat: Material, solid := tr
 		c.size = size
 		collider.shape = c
 		root.add_child(collider)
-		if parent == self and size.y < 50.0 and pos.y > -0.5:
+		if register:
 			obstacles.append(AABB(pos - size / 2.0, size))
 	return root
 
 
 func _create_world() -> void:
-	var env := WorldEnvironment.new()
-	add_child(env)
+	world_env = WorldEnvironment.new()
+	add_child(world_env)
 	var e := Environment.new()
-	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = SEA.lerp(BONE, 0.25)
-	sky_mat.sky_horizon_color = BONE
-	sky_mat.ground_horizon_color = SAND
-	sky_mat.ground_bottom_color = KHAKI
-	sky_mat.sun_angle_max = 30.0
+	var sky_mat := ShaderMaterial.new()
+	sky_mat.shader = preload("res://shaders/sky.gdshader")
+	sky_mat.set_shader_parameter("cloud_noise", Terrain.noise_texture(0.02, 99, false, 512))
 	var sky := Sky.new()
 	sky.sky_material = sky_mat
+	sky.radiance_size = Sky.RADIANCE_SIZE_64
 	e.background_mode = Environment.BG_SKY
 	e.sky = sky
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	e.ambient_light_color = SAND
-	e.ambient_light_energy = 0.4
-	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.environment = e
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-48, -30, 0)
-	sun.light_color = BONE
-	sun.light_energy = 1.1
+	e.ambient_light_color = SAND.lerp(SEA.lightened(0.5), 0.25)
+	e.ambient_light_energy = 0.72
+	e.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	e.tonemap_mode = Environment.TONE_MAPPER_ACES
+	e.tonemap_exposure = 0.95
+	e.tonemap_white = 6.0
+	# Warm desert haze: distance fog tinted bone/sand, a little thicker near the ground.
+	e.fog_enabled = true
+	e.fog_light_color = BONE.lerp(SAND, 0.35)
+	e.fog_light_energy = 1.0
+	e.fog_sun_scatter = 0.25
+	e.fog_density = 0.005
+	e.fog_sky_affect = 0.45
+	e.fog_height = 1.0
+	e.fog_height_density = 0.015
+	e.glow_enabled = true
+	e.glow_intensity = 0.55
+	e.glow_strength = 0.9
+	e.glow_bloom = 0.04
+	e.glow_hdr_threshold = 1.0
+	e.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	# Colour grading toward the HARAQ palette: slightly warmer, less saturated, more contrast.
+	e.adjustment_enabled = true
+	e.adjustment_brightness = 1.0
+	e.adjustment_contrast = 1.1
+	e.adjustment_saturation = 0.9
+	world_env.environment = e
+	sun = DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-38, -42, 0)
+	sun.light_color = Color(1.0, 0.9, 0.74)
+	sun.light_energy = 1.35
 	sun.shadow_enabled = true
+	sun.shadow_bias = 0.04
+	sun.shadow_normal_bias = 1.2
+	sun.shadow_blur = 1.6
+	sun.directional_shadow_fade_start = 0.75
 	add_child(sun)
-	var sand := material(KHAKI.lerp(SAND, 0.55))
-	var stone := material(KHAKI.darkened(0.1))
-	var stone2 := material(KHAKI.lerp(INK, 0.15).lerp(SAND, 0.2))
-	var dark := material(INK.lerp(KHAKI, 0.25))
-	box(self, Vector3(0, -0.6, 0), Vector3(180, 1, 180), sand)
+	# Terrain: rolling dunes (visual mesh + 1 m heightmap collision) and the sea to the north.
+	var ground := StaticBody3D.new()
+	ground.name = "Terrain"
+	add_child(ground)
+	var terrain_mesh := MeshInstance3D.new()
+	terrain_mesh.mesh = Terrain.build_mesh()
+	terrain_mesh.material_override = Terrain.terrain_material()
+	ground.add_child(terrain_mesh)
+	ground.add_child(Terrain.build_collision())
+	add_child(Terrain.build_sea())
+	var sandstone := G.pbr("sandstone", Color(1.0, 0.9, 0.74), 0.4)
+	var sandstone2 := G.pbr("sandstone", Color(0.9, 0.78, 0.6), 0.33)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1942
 	for i in range(75):
@@ -201,17 +253,32 @@ func _create_world() -> void:
 		if absf(x) < 10 and absf(z) < 10:
 			continue
 		var h := rng.randf_range(1.4, 5.5)
-		box(self, Vector3(x, h / 2.0, z), Vector3(rng.randf_range(2.0, 6.0), h, rng.randf_range(2.0, 6.0)), stone if i % 2 == 0 else stone2)
+		var size := Vector3(rng.randf_range(2.0, 6.0), h, rng.randf_range(2.0, 6.0))
+		if i % 6 != 3:
+			# Boulders read better when they are not taller than they are wide.
+			h = minf(h, maxf(size.x, size.z) * 0.95)
+			size.y = h
+		if i % 6 == 3:
+			# Ruined sandstone block.
+			box(self, Vector3(x, h / 2.0, z), size, sandstone if i % 2 == 0 else sandstone2)
+		else:
+			_add_boulder(Vector3(x, 0, z), size, i)
 	for i in range(18):
 		var z := -55.0 + i * 6.0
-		box(self, Vector3(-14, 1.2, z), Vector3(1.0, 2.4, 4.5), stone)
+		box(self, Vector3(-14, 1.2, z), Vector3(1.0, 2.4, 4.5), sandstone2 if i % 3 == 0 else sandstone)
+	# Sandbag emplacements (same cover footprint as before).
+	var bag_xf: Array[Transform3D] = []
+	var fill := G.pbr("sand_coarse", Color(0.95, 0.85, 0.68), 0.5)
 	for i in range(10):
 		var x := -36.0 + i * 8.0
-		box(self, Vector3(x, 0.6, -25), Vector3(3.5, 1.2, 1.8), dark)
+		box(self, Vector3(x, 0.55, -25), Vector3(3.3, 1.1, 1.0), fill)
+		for row in [-0.6, 0.6]:
+			bag_xf.append_array(Props.sandbag_wall_transforms(Vector3(x - 1.8, 0, -25 + row), Vector3(x + 1.8, 0, -25 + row), 6))
 	# Broken desert walls and a clear central combat lane.
-	box(self, Vector3(17, 1.7, -10), Vector3(14, 3.4, 1.4), stone2)
-	box(self, Vector3(23, 1.7, -20), Vector3(1.4, 3.4, 18), stone2)
-	box(self, Vector3(-18, 1.3, 8), Vector3(11, 2.6, 1.2), stone)
+	box(self, Vector3(17, 1.7, -10), Vector3(14, 3.4, 1.4), sandstone)
+	box(self, Vector3(23, 1.7, -20), Vector3(1.4, 3.4, 18), sandstone2)
+	box(self, Vector3(-18, 1.3, 8), Vector3(11, 2.6, 1.2), sandstone)
+	_create_battlefield(bag_xf)
 	# Invisible boundary walls so nobody walks off the edge of the map.
 	for side in [Vector3(90, 5, 0), Vector3(-90, 5, 0), Vector3(0, 5, 90), Vector3(0, 5, -90)]:
 		var wall := StaticBody3D.new()
@@ -224,10 +291,109 @@ func _create_world() -> void:
 		wall.add_child(col)
 
 
+func _add_boulder(pos: Vector3, size: Vector3, seed_v: int) -> void:
+	var gy := Terrain.footprint_min(pos, size) - 0.3
+	Props.add_rock(self, Vector3(pos.x, gy, pos.z), Vector3(size.x * 0.95, size.y + 0.3, size.z * 0.95), seed_v, 0.0)
+	obstacles.append(AABB(Vector3(pos.x - size.x * 0.5, gy, pos.z - size.z * 0.5), Vector3(size.x, size.y + 0.3, size.z)))
+
+
+func _area_clear(center: Vector3, half: Vector3) -> bool:
+	var probe := AABB(center - Vector3(half.x, -0.1 - Terrain.height(center.x, center.z), half.z), Vector3(half.x * 2.0, 3.0, half.z * 2.0))
+	for o in obstacles:
+		if o.intersects(probe):
+			return false
+	return true
+
+
+## Find a free spot near `want` (spiral search) for a prop with the given half extents.
+func _free_spot(want: Vector3, half: Vector3) -> Vector3:
+	for k in range(40):
+		var a := float(k) * 2.4
+		var r := float(k) * 1.5
+		var p := want + Vector3(cos(a) * r, 0, sin(a) * r)
+		if absf(p.x) < 80 and absf(p.z) < 80 and _area_clear(p, half):
+			return p
+	return want
+
+
+## El Alamein 1942 set dressing: wrecks, smoke, wire, sandbag pits, camel thorn, beach defences.
+func _create_battlefield(bag_xf: Array[Transform3D]) -> void:
+	var wrecks := [
+		["tank", Vector3(32, 0, -46), 0.6, 0], ["tank", Vector3(-56, 0, 42), 2.3, 1], ["tank", Vector3(54, 0, 30), -0.9, 0],
+		["truck", Vector3(8, 0, -64), 1.2, 0], ["truck", Vector3(-62, 0, -62), -0.4, 0], ["tank", Vector3(-8, 0, 58), 1.9, 1],
+	]
+	var n := 0
+	for w in wrecks:
+		var half := Vector3(3.6, 0, 3.6)
+		var p := _free_spot(w[1], half)
+		var body: StaticBody3D
+		if w[0] == "tank":
+			body = Props.add_tank(self, p, w[2], w[3])
+		else:
+			body = Props.add_truck(self, p, w[2])
+		body.set_meta("metal", true)
+		obstacles.append(AABB(Vector3(p.x - 3.3, body.position.y, p.z - 3.3), Vector3(6.6, 2.6, 6.6)))
+		if n % 2 == 0 and Fx.enabled():
+			smoke_plumes.append(Props.add_smoke(self, body.position + Vector3(0, 2.0, 0)))
+		n += 1
+	# Circular sandbag gun pits.
+	for c in [Vector3(40, 0, 6), Vector3(-6, 0, -48), Vector3(-50, 0, 18), Vector3(60, 0, -62)]:
+		var p := _free_spot(c, Vector3(2.6, 0, 2.6))
+		for k in range(12):
+			if k == 3 or k == 4:
+				continue # opening
+			var a0 := TAU * k / 12.0
+			var a1 := TAU * (k + 1) / 12.0
+			bag_xf.append_array(Props.sandbag_wall_transforms(p + Vector3(cos(a0), 0, sin(a0)) * 2.2, p + Vector3(cos(a1), 0, sin(a1)) * 2.2, 4))
+			var mid := p + Vector3(cos((a0 + a1) * 0.5), 0, sin((a0 + a1) * 0.5)) * 2.2
+			var col := StaticBody3D.new()
+			add_child(col)
+			col.position = Vector3(mid.x, Terrain.height(mid.x, mid.z) + 0.45, mid.z)
+			col.rotation.y = -(a0 + a1) * 0.5
+			var cs := CollisionShape3D.new()
+			var bs := BoxShape3D.new()
+			bs.size = Vector3(0.7, 0.9, 1.2)
+			cs.shape = bs
+			col.add_child(cs)
+		obstacles.append(AABB(Vector3(p.x - 2.6, Terrain.height(p.x, p.z), p.z - 2.6), Vector3(5.2, 1.0, 5.2)))
+	Props.sandbag_multimesh(self, bag_xf)
+	# Concertina wire in front of the sandbag line and along the beach.
+	for seg in [[Vector3(-38, 0, -29.5), Vector3(-22, 0, -29.5)], [Vector3(-12, 0, -29.5), Vector3(8, 0, -29.5)], [Vector3(16, 0, -29.5), Vector3(36, 0, -29.5)],
+			[Vector3(-80, 0, -88), Vector3(-30, 0, -88)], [Vector3(-20, 0, -88), Vector3(30, 0, -88)], [Vector3(40, 0, -88), Vector3(84, 0, -88)]]:
+		Props.add_wire(self, seg[0], seg[1])
+	# Steel beach obstacles ("hedgehogs") on the sand outside the arena.
+	var steel := G.pbr("metal_rust", Color(0.4, 0.33, 0.27), 1.0, true, 0.7, 0.6)
+	var hrng := RandomNumberGenerator.new()
+	hrng.seed = 42
+	for i in range(14):
+		var x := -120.0 + i * 18.0 + hrng.randf_range(-4, 4)
+		var z := Terrain.shore_z(x) + hrng.randf_range(2.0, 9.0)
+		var hh := Node3D.new()
+		add_child(hh)
+		hh.position = Vector3(x, Terrain.height(x, z) + 0.55, z)
+		hh.rotation.y = hrng.randf() * TAU
+		for r in [Vector3(0.6, 0, 0), Vector3(0, 0, 0.6), Vector3(0, PI * 0.5, 0.6)]:
+			var bm := MeshInstance3D.new()
+			var bb := BoxMesh.new()
+			bb.size = Vector3(0.15, 1.7, 0.15)
+			bm.mesh = bb
+			bm.material_override = steel
+			bm.rotation = r
+			hh.add_child(bm)
+	# Date palms along the coast road.
+	for i in range(9):
+		var x := -70.0 + i * 17.0 + hrng.randf_range(-3, 3)
+		var z := -84.0 + hrng.randf_range(-2, 2)
+		if _area_clear(Vector3(x, 0, z), Vector3(0.6, 0, 0.6)):
+			Props.add_palm(self, Vector3(x, 0, z), hrng.randf_range(5.5, 8.0), i + 10)
+	bushes = Props.scatter_bushes(self, 340, func(p: Vector3) -> bool: return _area_clear(p, Vector3(0.8, 0, 0.8)))
+	bush_total = bushes.multimesh.visible_instance_count
+
+
 func _create_player() -> void:
 	player = CharacterBody3D.new()
 	player.name = "Player"
-	player.position = Vector3(0, 2, 12)
+	player.position = Vector3(0, Terrain.height(0, 12) + 1.0, 12)
 	add_child(player)
 	var collider := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
@@ -261,9 +427,70 @@ func current_stats() -> Dictionary:
 func _rebuild_gun_model() -> void:
 	for c in gun.get_children():
 		gun.remove_child(c)
-		c.queue_free()
+		if c != player_flash:
+			c.queue_free()
 	if current_weapon() != "":
-		Weapons.build_model(current_weapon(), gun, 0.8)
+		Weapons.build_model(current_weapon(), gun, 0.8, false)
+		_build_fp_arms()
+	if player_flash != null:
+		gun.add_child(player_flash)
+		_place_flash()
+
+
+## First-person sleeves and hands gripping the current weapon.
+func _build_fp_arms() -> void:
+	var w := current_stats()
+	var sleeve := G.pbr("linen", Color(0.62, 0.53, 0.37), 6.0, true, 0.95, 0.0, 0.5, false)
+	var skin := G.flat(Color(0.66, 0.47, 0.34), 0.75)
+	var cuff := G.flat(Color(0.5, 0.42, 0.29), 0.9)
+	var grip: Vector3 = (w.get("grip", Vector3(0, -0.08, 0.05)) as Vector3) * 0.8
+	var fore: Vector3 = (w.get("fore", Vector3(0, -0.08, -0.25)) as Vector3) * 0.8
+	var pistol: bool = current_weapon() == "webley"
+	var hands := [[grip + Vector3(0.012, 0.0, 0.0), Vector3(0.22, -0.5, 0.45)]]
+	if pistol:
+		hands.append([grip + Vector3(-0.045, -0.01, 0.01), Vector3(-0.2, -0.5, 0.42)])
+	else:
+		hands.append([fore + Vector3(-0.02, -0.01, 0.0), Vector3(-0.28, -0.5, 0.25)])
+	for h in hands:
+		var hand_pos: Vector3 = h[0]
+		var elbow: Vector3 = h[1]
+		var hand := MeshInstance3D.new()
+		var hb := BoxMesh.new()
+		hb.size = Vector3(0.07, 0.085, 0.1)
+		hand.mesh = hb
+		hand.material_override = skin
+		hand.position = hand_pos
+		hand.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		gun.add_child(hand)
+		var arm := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		var length := hand_pos.distance_to(elbow)
+		cyl.top_radius = 0.036
+		cyl.bottom_radius = 0.046
+		cyl.height = length
+		cyl.radial_segments = 10
+		arm.mesh = cyl
+		arm.material_override = sleeve
+		arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		gun.add_child(arm)
+		var mid := (hand_pos + elbow) * 0.5
+		var up := (hand_pos - elbow).normalized()
+		var side := up.cross(Vector3.FORWARD).normalized()
+		if side.length() < 0.1:
+			side = Vector3.RIGHT
+		var fwd := side.cross(up).normalized()
+		arm.transform = Transform3D(Basis(side, up, fwd), mid)
+		var c := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.04
+		cm.bottom_radius = 0.04
+		cm.height = 0.035
+		cm.radial_segments = 10
+		c.mesh = cm
+		c.material_override = cuff
+		c.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		c.transform = Transform3D(Basis(side, up, fwd), hand_pos - up * 0.07)
+		gun.add_child(c)
 
 
 func _create_muzzle_flash() -> void:
@@ -273,6 +500,17 @@ func _create_muzzle_flash() -> void:
 	shot_flash.omni_range = 4.0
 	camera.add_child(shot_flash)
 	shot_flash.position = Vector3(0.25, -0.22, -0.9)
+	shot_flash.shadow_enabled = false
+	player_flash = Fx.flash_mesh(0.3)
+	gun.add_child(player_flash)
+	_place_flash()
+
+
+func _place_flash() -> void:
+	if player_flash == null:
+		return
+	var w := current_stats()
+	player_flash.position = (w.get("muzzle", Vector3(0, 0, -0.6)) as Vector3) * 0.8
 
 
 func _reload() -> void:
@@ -411,7 +649,7 @@ func interact() -> void:
 func _spawn_crate(pos: Vector3, contents: Dictionary, small := false) -> Node3D:
 	var crate: Node3D = LootScript.new()
 	add_child(crate)
-	crate.position = Vector3(pos.x, 0.0, pos.z)
+	crate.position = Vector3(pos.x, Terrain.height(pos.x, pos.z) - 0.04, pos.z)
 	crate.rotation.y = loot_rng.randf() * TAU
 	crate.setup(contents, small)
 	loot_crates.append(crate)
@@ -451,7 +689,7 @@ func _toggle_aim() -> void:
 
 
 func _spawn_point_clear(p: Vector3) -> bool:
-	var probe := AABB(p + Vector3(-0.8, 0.1, -0.8), Vector3(1.6, 1.8, 1.6))
+	var probe := AABB(Vector3(p.x - 0.8, Terrain.height(p.x, p.z) + 0.1, p.z - 0.8), Vector3(1.6, 1.8, 1.6))
 	for o in obstacles:
 		if o.intersects(probe):
 			return false
@@ -459,9 +697,9 @@ func _spawn_point_clear(p: Vector3) -> bool:
 
 
 func _create_enemies() -> void:
-	var uniform := material(Color(0.33, 0.33, 0.24))
-	var helmet := material(Color(0.20, 0.23, 0.17), 0.7)
-	var metal := material(INK, 0.4)
+	var uniform := G.pbr("linen", Color(0.74, 0.66, 0.48), 3.0, true, 0.95, 0.0, 0.9, false)
+	var helmet := G.pbr("metal_rust", Color(0.56, 0.52, 0.4), 3.0, true, 0.6, 0.3, 0.5, false)
+	var metal := G.flat(INK, 0.4, 0.7)
 	var ember_mat := StandardMaterial3D.new()
 	ember_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	ember_mat.albedo_color = EMBER
@@ -476,6 +714,7 @@ func _create_enemies() -> void:
 			var r := radius + (1.5 * tries if tries % 2 == 0 else -1.2 * tries)
 			r = clampf(r, 14.0, 76.0)
 			p = Vector3(sin(angle + tries * 0.05) * r, 0.05, cos(angle + tries * 0.05) * r)
+		p.y = Terrain.height(p.x, p.z) + 0.1
 		var enemy: CharacterBody3D = EnemyScript.new()
 		enemy.name = "Enemy%d" % i
 		add_child(enemy)
@@ -806,6 +1045,9 @@ func _physics_process(delta: float) -> void:
 	hit_marker_timer = maxf(0.0, hit_marker_timer - delta)
 	hit_marker.visible = hit_marker_timer > 0.0
 	shot_flash.light_energy = move_toward(shot_flash.light_energy, 0.0, delta * 45.0)
+	shot_flash.visible = shot_flash.light_energy > 0.01
+	flash_timer = maxf(0.0, flash_timer - delta)
+	player_flash.visible = flash_timer > 0.0
 	camera.fov = move_toward(camera.fov, ADS_FOV if aiming else HIP_FOV, delta * 180.0)
 	# Mouse "fire" is also emulated from touches on phones, so only the FIRE button shoots there.
 	var trigger := fire_held or (not is_mobile and Input.is_action_pressed("fire"))
@@ -892,6 +1134,10 @@ func _shoot() -> void:
 		return
 	mag_ammo[id] = int(mag_ammo[id]) - 1
 	shot_flash.light_energy = 3.5
+	flash_timer = 0.05
+	player_flash.visible = true
+	player_flash.rotation.z = randf() * TAU
+	player_flash.scale = Vector3.ONE * randf_range(0.8, 1.25)
 	cooldown = float(w["interval"])
 	recoil = -float(w["recoil"])
 	# Gunfire is loud: nearby patrols come looking.
@@ -909,6 +1155,13 @@ func _shoot() -> void:
 	if result.is_empty():
 		return
 	var hit: Object = result.collider
+	var detail: float = G.preset(quality)["detail"]
+	var kind := "sand"
+	if hit != null and hit.has_method("take_hit"):
+		kind = "soldier"
+	elif hit is Node and (hit as Node).has_meta("metal"):
+		kind = "metal"
+	Fx.impact(self, result.position + result.normal * 0.05, result.normal, kind, detail)
 	if hit != null and hit.has_method("take_hit"):
 		hit_marker_timer = 0.14
 		# Headshots (top of the capsule) drop a soldier instantly.
@@ -954,25 +1207,33 @@ func _end_mission(victory: bool) -> void:
 
 # Egyptian civilian atmosphere: fictional 1942-inspired market set dressing.
 func _create_egyptian_life() -> void:
-	var mud := material(KHAKI.lerp(SAND, 0.3))
-	var wood := material(Color(0.31, 0.20, 0.12))
-	var cloth := material(EMBER.darkened(0.2))
-	var leaf := material(Color(0.20, 0.34, 0.16))
-	var road := material(KHAKI.darkened(0.2))
-	# Market lane on the edge of the existing training arena.
-	box(self, Vector3(-33, 0.01, -17), Vector3(9, 0.05, 46), road, false)
+	var mud := G.pbr("mudbrick", Color(1.0, 0.97, 0.92), 0.45)
+	var mud_dark := G.pbr("mudbrick", Color(0.88, 0.8, 0.7), 0.45)
+	var wood := G.pbr("planks", Color(0.62, 0.48, 0.34), 0.9)
+	var dark := G.flat(INK.lerp(KHAKI, 0.15), 1.0)
+	var road := G.pbr("sand_coarse", Color(1.0, 0.9, 0.74), 0.3)
+	var awning_a := G.pbr("burlap", EMBER.lerp(BONE, 0.15), 1.2, true, 1.0)
+	var awning_b := G.pbr("burlap", SEA.lerp(BONE, 0.2), 1.2, true, 1.0)
+	# Market lane on the edge of the arena (packed earth).
+	box(self, Vector3(-33, 0.0, -17), Vector3(9, 0.3, 46), road, false)
 	for i in range(5):
 		var z := -35.0 + float(i) * 9.0
-		box(self, Vector3(-40, 2.0, z), Vector3(5, 4, 6), mud)
+		var hh := 4.0 + float(i % 2) * 0.6
+		box(self, Vector3(-40, hh / 2.0, z), Vector3(5, hh, 6), mud if i % 2 == 0 else mud_dark)
+		# Roof parapet, door and small windows.
+		box(self, Vector3(-40, hh + 0.2, z), Vector3(5.2, 0.4, 6.2), mud_dark, false)
+		box(self, Vector3(-37.47, 1.1, z + 1.6), Vector3(0.1, 2.2, 1.1), dark, false)
+		for wz in [-1.6, 0.0]:
+			box(self, Vector3(-37.47, 2.6, z + wz), Vector3(0.1, 0.7, 0.6), dark, false)
 		box(self, Vector3(-37.3, 1.2, z), Vector3(0.3, 2.4, 1.5), wood, false)
-		box(self, Vector3(-37.0, 2.6, z), Vector3(3, 0.18, 3), cloth if i % 2 == 0 else material(SEA), false)
+		box(self, Vector3(-36.6, 2.6, z), Vector3(2.2, 0.08, 3.2), awning_a if i % 2 == 0 else awning_b, false)
 		box(self, Vector3(-36.8, 0.6, z - 1.2), Vector3(1.4, 1.2, 0.6), wood)
 		var sign := Label3D.new()
 		sign.text = ["قهوة المحروسة", "بقالة عم سيد", "ورشة أولاد النيل", "عيش بلدي", "سوق البلد"][i]
 		sign.font = ARABIC_FONT
 		sign.font_size = 80
 		sign.pixel_size = 0.003
-		sign.position = Vector3(-36.9, 3.5, z)
+		sign.position = Vector3(-37.4, 3.45, z - 0.6)
 		sign.rotation_degrees.y = 90
 		sign.modulate = INK
 		sign.outline_modulate = Color(BONE, 0.6)
@@ -981,29 +1242,67 @@ func _create_egyptian_life() -> void:
 		add_child(sign)
 	for i in range(7):
 		var z := -38.0 + float(i) * 11.0
-		box(self, Vector3(-23, 2.2, z), Vector3(0.5, 4.4, 0.5), wood, false)
-		for k in range(4):
-			var crown := MeshInstance3D.new()
-			var sphere := SphereMesh.new()
-			sphere.radius = 2.1
-			sphere.height = 0.8
-			crown.mesh = sphere
-			crown.material_override = leaf
-			crown.position = Vector3(-23 + cos(float(k) * PI / 2.0) * 1.1, 4.7, z + sin(float(k) * PI / 2.0) * 1.1)
-			add_child(crown)
-	# A simple Egyptian-style donkey cart silhouette (static prop, no animals).
+		Props.add_palm(self, Vector3(-23, 0, z), 4.8 + float(i % 3) * 0.7, i)
+		# Keep the old trunk collision so cover/AI behaviour is unchanged.
+		var trunk := StaticBody3D.new()
+		add_child(trunk)
+		trunk.position = Vector3(-23, Terrain.height(-23, z) + 2.2, z)
+		var tc := CollisionShape3D.new()
+		var tb := BoxShape3D.new()
+		tb.size = Vector3(0.5, 4.4, 0.5)
+		tc.shape = tb
+		trunk.add_child(tc)
+	# Egyptian donkey cart (static prop, no animals).
 	box(self, Vector3(-28, 0.9, -6), Vector3(3.1, 0.3, 1.6), wood, false)
+	box(self, Vector3(-28, 1.2, -6.75), Vector3(3.1, 0.35, 0.08), wood, false)
+	box(self, Vector3(-28, 1.2, -5.25), Vector3(3.1, 0.35, 0.08), wood, false)
+	box(self, Vector3(-30.2, 0.8, -6), Vector3(1.6, 0.08, 0.08), wood, false)
 	for side in [-1.0, 1.0]:
 		var wheel := MeshInstance3D.new()
 		var cyl := CylinderMesh.new()
 		cyl.top_radius = 0.65
 		cyl.bottom_radius = 0.65
-		cyl.height = 0.15
+		cyl.height = 0.12
+		cyl.radial_segments = 16
 		wheel.mesh = cyl
 		wheel.material_override = wood
-		wheel.rotation_degrees.z = 90
-		wheel.position = Vector3(-28, 0.7, -6 + side * 0.85)
+		wheel.rotation_degrees.x = 90
+		wheel.position = Vector3(-28, Terrain.height(-28, -6) + 0.62, -6 + side * 0.85)
 		add_child(wheel)
+
+
+## Apply a graphics preset (0 Low / 1 Medium / 2 High) to the environment, sun, viewport and props.
+func apply_quality(q: int) -> void:
+	quality = clampi(q, 0, 2)
+	var pr := G.preset(quality)
+	var e := world_env.environment
+	e.glow_enabled = pr["glow"]
+	e.fog_density = pr["fog_density"]
+	sun.shadow_enabled = pr["shadows"]
+	sun.directional_shadow_mode = [DirectionalLight3D.SHADOW_ORTHOGONAL, DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS, DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS][int(pr["shadow_mode"])]
+	sun.directional_shadow_max_distance = maxf(10.0, pr["shadow_distance"])
+	RenderingServer.directional_shadow_atlas_set_size(int(pr["shadow_atlas"]), true)
+	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_LOW if quality < 2 else RenderingServer.SHADOW_QUALITY_SOFT_MEDIUM)
+	var vp := get_viewport()
+	vp.msaa_3d = pr["msaa"]
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+	vp.scaling_3d_scale = pr["scale_mobile"] if is_mobile else pr["scale"]
+	vp.mesh_lod_threshold = 1.0 / float(pr["lod_bias"])
+	if camera:
+		camera.far = pr["far"]
+	if bushes:
+		bushes.multimesh.visible_instance_count = int(bush_total * float(pr["detail"]))
+	for sp in smoke_plumes:
+		if is_instance_valid(sp):
+			sp.visible = pr["smoke"]
+			(sp as CPUParticles3D).emitting = pr["smoke"]
+	for i in range(quality_buttons.size()):
+		quality_buttons[i].add_theme_stylebox_override("normal", _style(Color(EMBER, 0.85) if i == quality else Color(INK, 0.55), BRASS))
+
+
+func set_quality(q: int) -> void:
+	apply_quality(q)
+	G.save_quality(quality)
 
 
 func _create_hero_intro() -> void:
@@ -1020,8 +1319,8 @@ func _create_hero_intro() -> void:
 	layout.add_theme_constant_override("separation", 38)
 	layout.offset_left = 65
 	layout.offset_right = -65
-	layout.offset_top = 40
-	layout.offset_bottom = -40
+	layout.offset_top = 22
+	layout.offset_bottom = -22
 	intro_overlay.add_child(layout)
 	var portrait := TextureRect.new()
 	portrait.texture = load("res://assets/khaled_portrait.jpg")
@@ -1032,7 +1331,7 @@ func _create_hero_intro() -> void:
 	var content := VBoxContainer.new()
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.alignment = BoxContainer.ALIGNMENT_CENTER
-	content.add_theme_constant_override("separation", 14)
+	content.add_theme_constant_override("separation", 10)
 	layout.add_child(content)
 	var brand := Label.new()
 	brand.text = "حَرَق  HARAQ"
@@ -1057,6 +1356,23 @@ func _create_hero_intro() -> void:
 	controls.add_theme_font_size_override("font_size", 17)
 	controls.add_theme_color_override("font_color", Color(BONE, 0.7))
 	content.add_child(controls)
+	var qrow := HBoxContainer.new()
+	qrow.add_theme_constant_override("separation", 10)
+	content.add_child(qrow)
+	var ql := Label.new()
+	ql.text = "الجرافيك  GRAPHICS"
+	ql.add_theme_font_size_override("font_size", 20)
+	ql.add_theme_color_override("font_color", BRASS)
+	qrow.add_child(ql)
+	quality_buttons.clear()
+	for i in range(3):
+		var qb := Button.new()
+		qb.text = "%s  %s" % [G.NAMES_AR[i], G.NAMES[i]]
+		qb.custom_minimum_size = Vector2(170, 52)
+		qb.add_theme_font_size_override("font_size", 19)
+		qb.pressed.connect(set_quality.bind(i))
+		qrow.add_child(qb)
+		quality_buttons.append(qb)
 	var start := Button.new()
 	start.text = "ابدأ المهمة  |  START MISSION"
 	start.custom_minimum_size = Vector2(420, 82)

@@ -3,6 +3,7 @@ extends Node3D
 ## The game script checks the player's distance and calls take_* helpers.
 
 const Weapons := preload("res://scripts/weapons.gd")
+const G := preload("res://scripts/graphics.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
 const PICKUP_RADIUS := 1.7
@@ -18,13 +19,8 @@ var _model_y := 1.05
 
 func setup(p_contents: Dictionary, small := false) -> void:
 	contents = p_contents
-	var wood := StandardMaterial3D.new()
-	wood.albedo_color = Color(0.42, 0.27, 0.14)
-	wood.roughness = 0.9
-	var band := StandardMaterial3D.new()
-	band.albedo_color = Color("#C6A15B")
-	band.roughness = 0.5
-	band.metallic = 0.4
+	var wood := G.pbr("planks", Color(0.78, 0.66, 0.46), 1.6, true, 0.9, 0.0, 1.0, false)
+	var band := G.pbr("metal_rust", Color(0.55, 0.47, 0.32), 2.0, true, 0.5, 0.6, 0.6, false)
 	var s := 0.7 if small else 1.0
 	_add_box(Vector3(0, 0.3 * s, 0), Vector3(1.0, 0.6, 0.62) * s, wood)
 	_add_box(Vector3(0, 0.3 * s, 0), Vector3(1.03, 0.08, 0.65) * s, band)

@@ -1,0 +1,8 @@
+.godot/
+/build/
+*.apk
+*.aab
+*.keystore
+android/build/
+.import/
+export_credentials.cfg

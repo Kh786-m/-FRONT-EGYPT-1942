@@ -15,3 +15,10 @@
 
 ## الاستخدام
 افتح مجلد المشروع الذي يحتوي `project.godot` في Godot 4.3 ثم شغّل المشهد. يمكن استخدام ملف `.github/workflows/android-apk.yml` لبناء APK على GitHub Actions بعد رفع **محتويات المشروع** إلى جذر مستودع جديد.
+
+## Changelog v0.5.0
+- AI: شبكة ملاحة A* + حالة هجوم + كشف تعليق وتعافي (`scripts/nav.gd`, `scripts/enemy.gd`).
+- Audio: 20 مؤثر Ogg متولّد بالكود + شريط صوت وكتم في القائمة (`scripts/audio.gd`, `tools/gen_audio.py`).
+- Models: دبابات وأسلحة بتفاصيل أعلى كـ Mesh واحد (`scripts/meshkit.gd`).
+- HUD: لمس متعدد الأصابع وتخطيط متجاوب للموبايل.
+- Tests: `tools/tests/` (122 فحص + soak).

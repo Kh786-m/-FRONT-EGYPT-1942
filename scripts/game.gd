@@ -12,6 +12,8 @@ const G := preload("res://scripts/graphics.gd")
 const Terrain := preload("res://scripts/terrain.gd")
 const Props := preload("res://scripts/props.gd")
 const Fx := preload("res://scripts/fx.gd")
+const NavScript := preload("res://scripts/nav.gd")
+const AudioScript := preload("res://scripts/audio.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
 # HARAQ palette
@@ -122,14 +124,31 @@ var smoke_plumes: Array[Node3D] = []
 var player_flash: MeshInstance3D
 var flash_timer := 0.0
 var quality_buttons: Array[Button] = []
+var touch_actions := {}
+var touch_owner := {}
+var joy_home := Vector2.ZERO
+var joy_zone := Rect2()
+var touch_layout_size := Vector2.ZERO
+var nav: RefCounted
+var step_distance := 0.0
+var idle_time := 0.0
+var _style_on: StyleBoxFlat
+var _style_off: StyleBoxFlat
+var volume_slider: HSlider
+var mute_button: Button
+var audio: Node
 
 
 func _ready() -> void:
 	randomize()
-	is_mobile = OS.has_feature("mobile")
+	is_mobile = OS.has_feature("mobile") or "--touch-ui" in OS.get_cmdline_user_args()
+	audio = AudioScript.new()
+	audio.name = "Audio"
+	add_child(audio)
 	quality = G.load_quality()
 	_create_world()
 	_create_egyptian_life()
+	_build_nav()
 	_create_player()
 	_create_zone()
 	_create_loot()
@@ -141,6 +160,11 @@ func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if "--autostart" in OS.get_cmdline_user_args():
 		_start_hero_mission()
+
+
+func _build_nav() -> void:
+	nav = NavScript.new()
+	nav.build(obstacles, func(x: float, z: float) -> float: return Terrain.height(x, z))
 
 
 func is_playing() -> bool:
@@ -521,6 +545,7 @@ func _reload() -> void:
 	if int(mag_ammo.get(id, 0)) >= int(w["mag"]) or int(reserve.get(w["ammo"], 0)) <= 0:
 		return
 	reload_timer = float(w["reload"])
+	audio.play("reload", -3.0, 0.03)
 
 
 func _finish_reload() -> void:
@@ -544,6 +569,7 @@ func switch_to_slot(slot: int) -> void:
 	aiming = false
 	_rebuild_gun_model()
 	gun.position = GUN_HIP_POS + Vector3(0, -0.35, 0)
+	audio.play("switch", -6.0, 0.05)
 
 
 func swap_weapon() -> void:
@@ -633,6 +659,7 @@ func _collect_from(crate: Node3D, interact: bool) -> void:
 			crate.take_weapon()
 	if not got.is_empty():
 		_toast("  ".join(got))
+		audio.play("pickup", -4.0, 0.06)
 	crate.refresh_label()
 	if crate.is_empty():
 		loot_crates.erase(crate)
@@ -682,6 +709,9 @@ func _create_zone() -> void:
 	zone = ZoneScript.new()
 	zone.name = "Zone"
 	add_child(zone)
+	zone.phase_changed.connect(func(_phase: int, shrinking: bool) -> void:
+		if shrinking and state == GameState.PLAYING:
+			audio.play("zone_alarm", -4.0))
 
 
 func _toggle_aim() -> void:
@@ -748,6 +778,7 @@ func damage_player(amount: float, _from_pos: Vector3) -> void:
 		armor -= soaked
 		dmg -= soaked
 	_apply_player_damage(dmg, 0.45)
+	audio.play("hurt", -2.0, 0.1)
 
 
 ## Zone damage ignores armour.
@@ -890,53 +921,199 @@ func _create_ui() -> void:
 	hit_marker.visible = false
 	hit_marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(hit_marker)
-	joy_base = ColorRect.new()
-	joy_base.color = Color(SAND, 0.18)
-	joy_base.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-	joy_base.position = Vector2(45, -205)
-	joy_base.size = Vector2(150, 150)
+	_create_touch_controls(root)
+	get_viewport().size_changed.connect(func() -> void: layout_touch_controls(get_viewport().get_visible_rect().size))
+	layout_touch_controls(get_viewport().get_visible_rect().size)
+
+
+## ---------------------------------------------------------------- touch HUD
+## Touch buttons are hit-tested by hand per finger (Godot's Control buttons only see the first
+## finger through mouse emulation), so FIRE works while the other thumb holds the stick, and a
+## touch that starts on any button never turns into a camera drag.
+func _create_touch_controls(root: Control) -> void:
+	joy_base = Panel.new()
+	var jb := StyleBoxFlat.new()
+	jb.bg_color = Color(SAND, 0.14)
+	jb.border_color = Color(BONE, 0.35)
+	jb.set_border_width_all(3)
+	jb.set_corner_radius_all(100)
+	jb.anti_aliasing = true
+	joy_base.add_theme_stylebox_override("panel", jb)
 	joy_base.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(joy_base)
-	joy_knob = ColorRect.new()
-	joy_knob.color = Color(BONE, 0.5)
-	joy_knob.position = Vector2(55, 55)
-	joy_knob.size = Vector2(40, 40)
+	joy_knob = Panel.new()
+	var jk := StyleBoxFlat.new()
+	jk.bg_color = Color(BONE, 0.5)
+	jk.set_corner_radius_all(36)
+	joy_knob.add_theme_stylebox_override("panel", jk)
 	joy_knob.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	joy_base.add_child(joy_knob)
-	fire_button = _button(root, "FIRE", Vector2(-155, -185), Vector2(125, 125))
-	fire_button.add_theme_stylebox_override("normal", _style(Color(EMBER, 0.6), BONE))
-	fire_button.button_down.connect(func(): fire_held = true)
-	fire_button.button_up.connect(func(): fire_held = false)
-	jump_button = _button(root, "JUMP", Vector2(-290, -110), Vector2(115, 70))
-	jump_button.pressed.connect(_jump)
-	sprint_button = _button(root, "RUN", Vector2(-430, -110), Vector2(115, 70))
-	sprint_button.button_down.connect(func(): sprint_held = true)
-	sprint_button.button_up.connect(func(): sprint_held = false)
-	reload_button = _button(root, "RELOAD", Vector2(-295, -200), Vector2(125, 65))
-	reload_button.pressed.connect(_reload)
-	aim_button = _button(root, "AIM", Vector2(-155, -265), Vector2(125, 65))
-	aim_button.pressed.connect(_toggle_aim)
-	swap_button = _button(root, "SWAP", Vector2(-295, -275), Vector2(125, 65))
-	swap_button.pressed.connect(swap_weapon)
-	interact_button = _button(root, "التقط", Vector2(-430, -200), Vector2(125, 65))
-	interact_button.pressed.connect(interact)
-	heal_button = _button(root, "HEAL", Vector2(-430, -275), Vector2(125, 65))
-	heal_button.pressed.connect(use_medkit)
-	# Touch controls only make sense on phones/tablets.
+	fire_button = _button(root, "FIRE")
+	var fs := _style(Color(EMBER, 0.62), BONE)
+	fs.set_corner_radius_all(76)
+	fire_button.add_theme_stylebox_override("normal", fs)
+	fire_button.add_theme_font_size_override("font_size", 28)
+	aim_button = _button(root, "AIM")
+	reload_button = _button(root, "RELOAD")
+	jump_button = _button(root, "JUMP")
+	swap_button = _button(root, "SWAP")
+	heal_button = _button(root, "HEAL")
+	interact_button = _button(root, "التقط  PICK UP")
+	interact_button.add_theme_stylebox_override("normal", _style(Color(SEA, 0.8), BRASS))
+	sprint_button = _button(root, "RUN")
+	touch_actions = {
+		fire_button: [func() -> void: fire_held = true, func() -> void: fire_held = false],
+		aim_button: [_toggle_aim, Callable()],
+		reload_button: [_reload, Callable()],
+		jump_button: [_jump, Callable()],
+		swap_button: [swap_weapon, Callable()],
+		heal_button: [use_medkit, Callable()],
+		interact_button: [interact, Callable()],
+		sprint_button: [func() -> void: sprint_held = not sprint_held, Callable()],
+	}
 	for c in [joy_base, fire_button, jump_button, sprint_button, reload_button, aim_button, swap_button, interact_button, heal_button]:
 		c.visible = is_mobile
+	interact_button.visible = false
 
 
-func _button(parent: Control, label: String, offset: Vector2, dimensions: Vector2) -> Button:
+func _button(parent: Control, label: String) -> Button:
 	var b := Button.new()
 	b.text = label
 	b.focus_mode = Control.FOCUS_NONE
-	b.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
-	b.position = offset
-	b.size = dimensions
+	b.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	b.add_theme_font_size_override("font_size", 23)
 	parent.add_child(b)
 	return b
+
+
+## Thumb-reachable layout for any screen: buttons fan out around FIRE in the bottom-right
+## corner, the stick + RUN sit bottom-left, and PICK UP pops up between them only when there
+## is something to pick up. Sizes follow the viewport height and keep clear of notches.
+func layout_touch_controls(vp: Vector2) -> void:
+	if fire_button == null:
+		return
+	var s := clampf(vp.y / 720.0, 0.85, 1.5)
+	var safe := _safe_margins(vp)
+	var gap := 14.0 * s
+	var r := vp.x - safe.y - 28.0 * s
+	var btm := vp.y - safe.z - 24.0 * s
+	var bw := 128.0 * s
+	var bh := 76.0 * s
+	var fire := 156.0 * s
+	_place(fire_button, Vector2(r - fire, btm - fire), Vector2(fire, fire))
+	(fire_button.get_theme_stylebox("normal") as StyleBoxFlat).set_corner_radius_all(int(fire * 0.5) - 2)
+	_place(aim_button, Vector2(r - fire + (fire - bw) * 0.5, btm - fire - gap - bh), Vector2(bw, bh))
+	_place(reload_button, Vector2(r - fire - gap - bw, btm - bh), Vector2(bw, bh))
+	_place(jump_button, Vector2(r - fire - gap - bw, btm - bh * 2.0 - gap), Vector2(bw, bh))
+	_place(swap_button, Vector2(r - fire - gap * 2.0 - bw * 2.0, btm - bh), Vector2(bw, bh))
+	_place(heal_button, Vector2(r - fire - gap * 2.0 - bw * 2.0, btm - bh * 2.0 - gap), Vector2(bw, bh))
+	_place(interact_button, Vector2(r - fire - gap * 2.0 - bw * 2.0, btm - bh * 3.0 - gap * 2.0 - 8.0 * s), Vector2(bw * 2.0 + gap, bh))
+	var joy := 210.0 * s
+	joy_home = Vector2(safe.x + 48.0 * s, btm - joy)
+	joy_base.size = Vector2(joy, joy)
+	(joy_base.get_theme_stylebox("panel") as StyleBoxFlat).set_corner_radius_all(int(joy * 0.5) - 2)
+	(joy_knob.get_theme_stylebox("panel") as StyleBoxFlat).set_corner_radius_all(int(joy * 0.18) - 1)
+	joy_base.position = joy_home
+	joy_knob.size = Vector2(joy, joy) * 0.36
+	joy_knob.position = (joy_base.size - joy_knob.size) * 0.5
+	_place(sprint_button, Vector2(joy_home.x + (joy - bw) * 0.5, joy_home.y - gap - bh), Vector2(bw, bh))
+	joy_zone = Rect2(0, vp.y * 0.32, minf(vp.x * 0.4, joy_home.x + joy + 150.0 * s), vp.y * 0.68)
+	touch_layout_size = vp
+
+
+func _place(c: Control, pos: Vector2, sz: Vector2) -> void:
+	c.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	c.position = pos
+	c.size = sz
+
+
+## Safe-area margins (left, right, bottom) in viewport units, for notches / rounded corners.
+func _safe_margins(vp: Vector2) -> Vector3:
+	if DisplayServer.get_name() == "headless" or not is_mobile:
+		return Vector3.ZERO
+	var win := Vector2(DisplayServer.window_get_size())
+	var sa := DisplayServer.get_display_safe_area()
+	if win.x <= 0.0 or sa.size.x <= 0:
+		return Vector3.ZERO
+	var k := vp.x / win.x
+	return Vector3(maxf(0.0, sa.position.x * k), maxf(0.0, (win.x - sa.end.x) * k), maxf(0.0, (win.y - sa.end.y) * k))
+
+
+func _touch_button_at(pos: Vector2) -> Button:
+	for b in touch_actions.keys():
+		if (b as Control).visible and (b as Control).get_global_rect().grow(4.0).has_point(pos):
+			return b
+	return null
+
+
+## What a finger landing at `pos` controls: "button", "joystick" or "look".
+func classify_touch(pos: Vector2) -> String:
+	if _touch_button_at(pos) != null:
+		return "button"
+	if joy_zone.has_point(pos):
+		return "joystick"
+	return "look"
+
+
+func _touch_press(index: int, pos: Vector2) -> void:
+	var b := _touch_button_at(pos)
+	if b != null:
+		touch_owner[index] = b
+		b.modulate = Color(1.25, 1.15, 1.0)
+		var down: Callable = touch_actions[b][0]
+		if down.is_valid():
+			down.call()
+		# Drag from FIRE also aims (fire + look with one thumb).
+		if b == fire_button and look_id == -1:
+			look_id = index
+			touch_last = pos
+		return
+	if joy_zone.has_point(pos) and joystick_id == -1:
+		joystick_id = index
+		# Floating stick: it re-centres under the thumb.
+		var half := joy_base.size * 0.5
+		joy_base.position = (pos - half).clamp(Vector2.ZERO, get_viewport().get_visible_rect().size - joy_base.size)
+		_update_joystick(pos)
+	elif look_id == -1:
+		look_id = index
+		touch_last = pos
+
+
+func _touch_release(index: int) -> void:
+	if touch_owner.has(index):
+		var b: Button = touch_owner[index]
+		touch_owner.erase(index)
+		b.modulate = Color.WHITE
+		var up: Callable = touch_actions[b][1]
+		if up.is_valid():
+			up.call()
+	if index == joystick_id:
+		joystick_id = -1
+		joystick_vector = Vector2.ZERO
+		joy_base.position = joy_home
+		joy_knob.position = (joy_base.size - joy_knob.size) * 0.5
+	if index == look_id:
+		look_id = -1
+
+
+func _input(event: InputEvent) -> void:
+	if not is_mobile:
+		return
+	if state != GameState.PLAYING:
+		for i in touch_owner.keys():
+			_touch_release(i)
+		return
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			_touch_press(event.index, event.position)
+		else:
+			_touch_release(event.index)
+	elif event is InputEventScreenDrag:
+		if event.index == joystick_id:
+			_update_joystick(event.position)
+		elif event.index == look_id:
+			_look(event.position - touch_last, TOUCH_SENS)
+			touch_last = event.position
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -969,33 +1146,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT and not is_mobile:
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	if event is InputEventScreenTouch:
-		if event.pressed:
-			if event.position.x < get_viewport().get_visible_rect().size.x * 0.36 and joystick_id == -1:
-				joystick_id = event.index
-				_update_joystick(event.position)
-			elif look_id == -1 and event.position.x < get_viewport().get_visible_rect().size.x * 0.73:
-				look_id = event.index
-				touch_last = event.position
-		else:
-			if event.index == joystick_id:
-				joystick_id = -1
-				joystick_vector = Vector2.ZERO
-				joy_knob.position = Vector2(55, 55)
-			if event.index == look_id:
-				look_id = -1
-	if event is InputEventScreenDrag:
-		if event.index == joystick_id:
-			_update_joystick(event.position)
-		elif event.index == look_id:
-			_look(event.position - touch_last, TOUCH_SENS)
-			touch_last = event.position
 
 
 func _update_joystick(screen_pos: Vector2) -> void:
 	var center := joy_base.global_position + joy_base.size / 2.0
-	joystick_vector = ((screen_pos - center) / 70.0).limit_length(1.0)
-	joy_knob.position = Vector2(55, 55) + joystick_vector * 50.0
+	var reach := joy_base.size.x * 0.42
+	joystick_vector = ((screen_pos - center) / reach).limit_length(1.0)
+	joy_knob.position = (joy_base.size - joy_knob.size) * 0.5 + joystick_vector * reach * 0.75
 
 
 func _look(delta: Vector2, sensitivity: float = 1.0) -> void:
@@ -1017,14 +1174,29 @@ func _physics_process(delta: float) -> void:
 	if joystick_vector.length() > 0.1:
 		axis = joystick_vector
 	var dir := player.global_transform.basis * Vector3(axis.x, 0, axis.y)
-	var speed := RUN_SPEED if sprint_held or Input.is_action_pressed("sprint") else WALK_SPEED
+	# Pushing the stick all the way forward also sprints (thumb-friendly).
+	var stick_sprint := joystick_id != -1 and joystick_vector.y < -0.92
+	if sprint_held and axis.length() < 0.1:
+		idle_time += delta
+		if idle_time > 0.6:
+			sprint_held = false
+	else:
+		idle_time = 0.0
+	var speed := RUN_SPEED if sprint_held or stick_sprint or Input.is_action_pressed("sprint") else WALK_SPEED
 	player.velocity.x = dir.x * speed
 	player.velocity.z = dir.z * speed
 	if not player.is_on_floor():
 		player.velocity.y -= GRAVITY * delta
 	if Input.is_action_just_pressed("jump"):
 		_jump()
+	var before_step := player.global_position
 	player.move_and_slide()
+	if player.is_on_floor():
+		step_distance += Vector2(player.global_position.x - before_step.x, player.global_position.z - before_step.z).length()
+		if step_distance > (2.6 if speed > WALK_SPEED else 2.0):
+			step_distance = 0.0
+			audio.play("step", -8.0 if speed <= WALK_SPEED else -5.0, 0.12)
+	audio.update_mix(delta, player.global_position.z - Terrain.shore_z(player.global_position.x), zone.distance_outside(player.global_position), player.global_position)
 	if player.global_position.y < -20.0:
 		_end_mission(false)
 		return
@@ -1032,6 +1204,8 @@ func _physics_process(delta: float) -> void:
 	if since_damage > REGEN_DELAY and health < MAX_HEALTH:
 		health = minf(MAX_HEALTH, health + REGEN_RATE * delta)
 	_update_zone(delta)
+	if nav:
+		nav.tick(mission_time)
 	if state != GameState.PLAYING:
 		return
 	_update_loot_proximity()
@@ -1119,6 +1293,15 @@ func _update_hud() -> void:
 	if pickup_toast_timer > 0.0:
 		prompt = pickup_toast + ("\n" + prompt if prompt != "" else "")
 	pickup_label.text = prompt
+	if is_mobile:
+		var can_pick: bool = nearby_crate != null and is_instance_valid(nearby_crate) and nearby_crate.contents.get("weapon", "") != ""
+		interact_button.visible = can_pick
+		heal_button.modulate.a = 1.0 if medkits > 0 and health < MAX_HEALTH else 0.45
+		if _style_on == null:
+			_style_on = _style(Color(EMBER, 0.8), BRASS)
+			_style_off = _style(Color(INK, 0.55), BRASS)
+		sprint_button.add_theme_stylebox_override("normal", _style_on if sprint_held else _style_off)
+		aim_button.add_theme_stylebox_override("normal", _style_on if aiming else _style_off)
 
 
 func _shoot() -> void:
@@ -1130,9 +1313,13 @@ func _shoot() -> void:
 	trigger_released = false
 	var id := current_weapon()
 	if int(mag_ammo.get(id, 0)) <= 0:
+		if int(reserve.get(w["ammo"], 0)) <= 0:
+			audio.play("dry", -4.0)
+			cooldown = 0.3
 		_reload()
 		return
 	mag_ammo[id] = int(mag_ammo[id]) - 1
+	audio.play(AudioScript.SHOT.get(id, "shot_webley"), -1.0, 0.04)
 	shot_flash.light_energy = 3.5
 	flash_timer = 0.05
 	player_flash.visible = true
@@ -1162,6 +1349,7 @@ func _shoot() -> void:
 	elif hit is Node and (hit as Node).has_meta("metal"):
 		kind = "metal"
 	Fx.impact(self, result.position + result.normal * 0.05, result.normal, kind, detail)
+	audio.play_at({"soldier": "hit_flesh", "metal": "hit_metal"}.get(kind, "hit_sand"), result.position, -2.0 if kind == "soldier" else -6.0, 0.1)
 	if hit != null and hit.has_method("take_hit"):
 		hit_marker_timer = 0.14
 		# Headshots (top of the capsule) drop a soldier instantly.
@@ -1175,6 +1363,7 @@ func _restart() -> void:
 
 func _end_mission(victory: bool) -> void:
 	placement = 1 if victory else enemies.size() + 1
+	audio.stop_ambience()
 	state = GameState.WON if victory else GameState.DEAD
 	fire_held = false
 	sprint_held = false
@@ -1201,7 +1390,9 @@ func _end_mission(victory: bool) -> void:
 	restart.custom_minimum_size = Vector2(420, 82)
 	restart.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	restart.add_theme_font_size_override("font_size", 28)
-	restart.pressed.connect(_restart)
+	restart.pressed.connect(func() -> void:
+		audio.play("ui_click")
+		_restart())
 	box_layout.add_child(restart)
 
 
@@ -1252,6 +1443,7 @@ func _create_egyptian_life() -> void:
 		tb.size = Vector3(0.5, 4.4, 0.5)
 		tc.shape = tb
 		trunk.add_child(tc)
+		obstacles.append(AABB(Vector3(-23.25, Terrain.height(-23, z), z - 0.25), Vector3(0.5, 4.4, 0.5)))
 	# Egyptian donkey cart (static prop, no animals).
 	box(self, Vector3(-28, 0.9, -6), Vector3(3.1, 0.3, 1.6), wood, false)
 	box(self, Vector3(-28, 1.2, -6.75), Vector3(3.1, 0.35, 0.08), wood, false)
@@ -1331,28 +1523,28 @@ func _create_hero_intro() -> void:
 	var content := VBoxContainer.new()
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.alignment = BoxContainer.ALIGNMENT_CENTER
-	content.add_theme_constant_override("separation", 10)
+	content.add_theme_constant_override("separation", 5)
 	layout.add_child(content)
 	var brand := Label.new()
 	brand.text = "حَرَق  HARAQ"
-	brand.add_theme_font_size_override("font_size", 72)
+	brand.add_theme_font_size_override("font_size", 60)
 	brand.add_theme_color_override("font_color", EMBER)
 	content.add_child(brand)
 	var title := Label.new()
 	title.text = "WAR FRONT: EGYPT 1942"
-	title.add_theme_font_size_override("font_size", 32)
+	title.add_theme_font_size_override("font_size", 28)
 	title.add_theme_color_override("font_color", BRASS)
 	content.add_child(title)
 	var hero := Label.new()
 	hero.text = "خالد كارم عبداللا\nKHALED KAREM ABDALLA"
-	hero.add_theme_font_size_override("font_size", 28)
+	hero.add_theme_font_size_override("font_size", 24)
 	hero.add_theme_color_override("font_color", SAND)
 	content.add_child(hero)
 	_label(content, "قائد المهمة | العلمين - مصر 1942", 21)
 	_label(content, "باتل رويال: 20 جندي، صناديق إمداد، والدايرة بتضيق — آخر واحد واقف يكسب", 21)
 	_label(content, "Battle royale vs 20 soldiers — loot crates, shrinking zone, last one standing wins", 20, SAND)
 	var controls := Label.new()
-	controls.text = "Touch: stick + drag to look, FIRE / AIM / RELOAD / SWAP / PICK UP / HEAL" if is_mobile else "WASD · Mouse · RMB aim · R reload · E pick up · 1/2/wheel swap · H heal"
+	controls.text = "Touch: floating stick (push fully up = run) · drag anywhere else to look · drag from FIRE to aim while shooting" if is_mobile else "WASD · Mouse · RMB aim · R reload · E pick up · 1/2/wheel swap · H heal"
 	controls.add_theme_font_size_override("font_size", 17)
 	controls.add_theme_color_override("font_color", Color(BONE, 0.7))
 	content.add_child(controls)
@@ -1368,14 +1560,55 @@ func _create_hero_intro() -> void:
 	for i in range(3):
 		var qb := Button.new()
 		qb.text = "%s  %s" % [G.NAMES_AR[i], G.NAMES[i]]
-		qb.custom_minimum_size = Vector2(170, 52)
+		qb.custom_minimum_size = Vector2(170, 48)
 		qb.add_theme_font_size_override("font_size", 19)
 		qb.pressed.connect(set_quality.bind(i))
+		qb.pressed.connect(audio.play.bind("ui_click", 0.0, 0.0))
 		qrow.add_child(qb)
 		quality_buttons.append(qb)
+	var arow := HBoxContainer.new()
+	arow.add_theme_constant_override("separation", 12)
+	content.add_child(arow)
+	var al := Label.new()
+	al.text = "الصوت  SOUND"
+	al.add_theme_font_size_override("font_size", 20)
+	al.add_theme_color_override("font_color", BRASS)
+	arow.add_child(al)
+	volume_slider = HSlider.new()
+	volume_slider.min_value = 0
+	volume_slider.max_value = 100
+	volume_slider.step = 5
+	volume_slider.value = audio.volume * 100.0
+	volume_slider.custom_minimum_size = Vector2(300, 44)
+	volume_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	volume_slider.focus_mode = Control.FOCUS_NONE
+	var track := _style(Color(SAND, 0.25), BRASS)
+	track.content_margin_top = 6
+	track.content_margin_bottom = 6
+	volume_slider.add_theme_stylebox_override("slider", track)
+	var fill := _style(Color(EMBER, 0.85), BRASS)
+	fill.content_margin_top = 6
+	fill.content_margin_bottom = 6
+	volume_slider.add_theme_stylebox_override("grabber_area", fill)
+	volume_slider.add_theme_stylebox_override("grabber_area_highlight", fill)
+	volume_slider.value_changed.connect(func(v: float) -> void:
+		audio.set_volume(v / 100.0)
+		_refresh_mute_button())
+	volume_slider.drag_ended.connect(func(_c: bool) -> void: audio.play("ui_click"))
+	arow.add_child(volume_slider)
+	mute_button = Button.new()
+	mute_button.custom_minimum_size = Vector2(170, 48)
+	mute_button.add_theme_font_size_override("font_size", 19)
+	mute_button.focus_mode = Control.FOCUS_NONE
+	mute_button.pressed.connect(func() -> void:
+		audio.set_muted(not audio.muted)
+		audio.play("ui_click")
+		_refresh_mute_button())
+	arow.add_child(mute_button)
+	_refresh_mute_button()
 	var start := Button.new()
 	start.text = "ابدأ المهمة  |  START MISSION"
-	start.custom_minimum_size = Vector2(420, 82)
+	start.custom_minimum_size = Vector2(420, 70)
 	start.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	start.add_theme_font_size_override("font_size", 28)
 	start.add_theme_stylebox_override("normal", _style(Color(EMBER, 0.85), BRASS))
@@ -1383,8 +1616,18 @@ func _create_hero_intro() -> void:
 	start.pressed.connect(_start_hero_mission)
 
 
+func _refresh_mute_button() -> void:
+	if mute_button == null:
+		return
+	var off: bool = audio.muted or audio.volume <= 0.001
+	mute_button.text = "صامت  MUTED" if off else "كتم  MUTE"
+	mute_button.add_theme_stylebox_override("normal", _style(Color(EMBER, 0.85) if off else Color(INK, 0.55), BRASS))
+
+
 func _start_hero_mission() -> void:
 	state = GameState.PLAYING
+	audio.play("ui_click")
+	audio.start_ambience()
 	intro_overlay.visible = false
 	if not is_mobile:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

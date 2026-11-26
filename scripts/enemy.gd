@@ -1,5 +1,7 @@
 extends CharacterBody3D
-## Simple enemy soldier AI: patrol -> detect (range + line of sight) -> chase -> shoot (hitscan).
+## Enemy soldier AI: patrol -> detect (range + line of sight) -> chase -> attack (hitscan).
+## Movement follows the navigation grid (scripts/nav.gd) around cover, with separation from
+## other soldiers and stuck detection + recovery.
 ## Also respects the shrinking zone: patrols relocate inside the next circle and soldiers
 ## caught outside run back in (and take zone damage like the player).
 
@@ -9,7 +11,7 @@ const MUZZLE_POS := Vector3(0.14, 1.19, -1.05)
 
 signal died(enemy: CharacterBody3D, by_player: bool)
 
-enum State { PATROL, CHASE }
+enum State { PATROL, CHASE, ATTACK }
 
 const PATROL_SPEED := 1.6
 const CHASE_SPEED := 3.6
@@ -41,6 +43,22 @@ var _flash_mesh: MeshInstance3D
 var _body: Node3D
 var _legs: Array[Node3D] = []
 var _walk_phase := 0.0
+var _path := PackedVector3Array()
+var _path_i := 0
+var _path_goal := Vector3(INF, 0, INF)
+var _repath_timer := 0.0
+var _strafe_timer := 0.0
+var _strafe_side := 1.0
+var _stuck_clock := 0.0
+var _stuck_from := Vector3.ZERO
+var _stuck_streak := 0
+var _unstick_timer := 0.0
+var _unstick_dir := Vector3.ZERO
+var _step_phase := 0.0
+## Diagnostics (tests / soak): how often this soldier got stuck and re-planned.
+var stuck_events := 0
+var repaths := 0
+var shots_fired := 0
 
 
 func setup(p_game: Node3D, p_origin: Vector3, p_axis: Vector3, p_phase: float, uniform: Material, helmet: Material, metal: Material, ember: Material) -> void:
@@ -171,6 +189,14 @@ func _animate(delta: float, speed: float) -> void:
 		_legs[0].rotation.x = swing
 		_legs[1].rotation.x = -swing
 	_body.position.y = absf(cos(_walk_phase)) * 0.04 * amount
+	# Footsteps (only audible close by; throttled by the walk cycle).
+	if amount > 0.15 and game != null and game.audio != null:
+		var step := floorf(_walk_phase / PI)
+		if step != _step_phase:
+			_step_phase = step
+			var d: float = global_position.distance_to(game.player.global_position)
+			if d < 16.0:
+				game.audio.play_at("step", global_position, -6.0 + amount * 3.0, 0.12)
 
 
 ## Called by the player's weapon. Returns true if this hit killed the enemy.
@@ -206,7 +232,9 @@ func _die(by_player: bool) -> void:
 func alert() -> void:
 	if game and is_instance_valid(game.player):
 		_last_known = game.player.global_position
-	state = State.CHASE
+	if state == State.PATROL:
+		state = State.CHASE
+		_repath_timer = 0.0
 	_lost_timer = 0.0
 
 
@@ -219,6 +247,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_clock += delta
 	_fire_cooldown = maxf(0.0, _fire_cooldown - delta)
+	_repath_timer -= delta
 	var player: CharacterBody3D = game.player
 	var to_player := player.global_position - global_position
 	to_player.y = 0.0
@@ -232,10 +261,10 @@ func _physics_process(delta: float) -> void:
 	var speed := 0.0
 	var zone: Node3D = game.zone
 	var outside_zone: bool = zone != null and not zone.is_inside(global_position)
-	# Keep the patrol post inside the circle the zone is closing toward.
+	# Keep the patrol post inside the circle the zone is closing toward (and off blocked cells).
 	if zone != null and Vector2(origin.x, origin.z).distance_to(zone.target_center) > zone.target_radius * 0.85:
-		origin = zone.random_point_in_target()
-	if outside_zone and not (state == State.CHASE and _can_see and dist < ATTACK_RANGE):
+		_set_origin(zone.random_point_in_target())
+	if outside_zone and state != State.ATTACK:
 		state = State.PATROL
 	match state:
 		State.PATROL:
@@ -244,29 +273,56 @@ func _physics_process(delta: float) -> void:
 			var goal := origin + patrol_axis * sin(_clock * 0.5 + patrol_phase) * 3.0
 			var to_goal := goal - global_position
 			to_goal.y = 0.0
-			if to_goal.length() > 0.2:
-				move_dir = to_goal.normalized()
+			if to_goal.length() > 0.4:
+				move_dir = _steer_to(goal)
 				speed = CHASE_SPEED if outside_zone else (PATROL_SPEED if to_goal.length() < 4.0 else CHASE_SPEED * 0.7)
 		State.CHASE:
 			if _can_see:
 				_last_known = player.global_position
 				_lost_timer = 0.0
-				_face(to_player, delta)
-				if dist > KEEP_DISTANCE:
-					move_dir = to_player.normalized()
-					speed = CHASE_SPEED
-				if dist < ATTACK_RANGE and _fire_cooldown <= 0.0:
-					_shoot(dist)
+				if dist < ATTACK_RANGE:
+					state = State.ATTACK
+					_strafe_timer = 0.0
 			else:
 				_lost_timer += delta
-				var to_last := _last_known - global_position
-				to_last.y = 0.0
-				if to_last.length() > 1.0:
-					move_dir = to_last.normalized()
-					speed = CHASE_SPEED
 				if _lost_timer > LOSE_SIGHT_TIME:
 					state = State.PATROL
-	if move_dir != Vector3.ZERO and not (state == State.CHASE and _can_see):
+			var to_last := _last_known - global_position
+			to_last.y = 0.0
+			if to_last.length() > 1.0:
+				move_dir = _steer_to(_last_known)
+				speed = CHASE_SPEED
+		State.ATTACK:
+			if not _can_see or dist > ATTACK_RANGE * 1.15:
+				state = State.CHASE
+				_repath_timer = 0.0
+			else:
+				_last_known = player.global_position
+				_lost_timer = 0.0
+				_face(to_player, delta)
+				if dist > KEEP_DISTANCE:
+					move_dir = _steer_to(player.global_position)
+					speed = CHASE_SPEED * 0.8
+				else:
+					# Hold the line and side-step so the soldier is not a static target.
+					_strafe_timer -= delta
+					if _strafe_timer <= 0.0:
+						_strafe_timer = randf_range(1.2, 2.4)
+						_strafe_side = -_strafe_side
+					var side := Vector3(-to_player.z, 0, to_player.x).normalized() * _strafe_side
+					if game.nav == null or game.nav.is_walkable(global_position + side * 1.2):
+						move_dir = side
+						speed = PATROL_SPEED
+				if _fire_cooldown <= 0.0:
+					_shoot(dist)
+	# Stuck recovery overrides the planned direction for a moment.
+	if _unstick_timer > 0.0:
+		_unstick_timer -= delta
+		move_dir = _unstick_dir
+		speed = maxf(speed, PATROL_SPEED * 1.5)
+	elif move_dir != Vector3.ZERO:
+		move_dir = (move_dir + _separation() * 0.8).normalized()
+	if move_dir != Vector3.ZERO and state != State.ATTACK:
 		_face(move_dir, delta)
 	velocity.x = move_dir.x * speed
 	velocity.z = move_dir.z * speed
@@ -276,6 +332,85 @@ func _physics_process(delta: float) -> void:
 	else:
 		velocity.y -= GRAVITY * delta
 	move_and_slide()
+	_check_stuck(delta, speed)
+
+
+func _set_origin(p: Vector3) -> void:
+	origin = game.nav.nearest_free_point(p) if game != null and game.nav != null else p
+	_repath_timer = 0.0
+
+
+## Direction toward `goal`, following the navigation grid around rocks, ruins and wrecks.
+func _steer_to(goal: Vector3) -> Vector3:
+	var pos := global_position
+	var nav = game.nav
+	if nav == null:
+		var d := goal - pos
+		d.y = 0.0
+		return d.normalized()
+	var goal_moved := Vector2(goal.x - _path_goal.x, goal.z - _path_goal.z).length() > 2.0
+	if _path.is_empty() or _repath_timer <= 0.0 or (goal_moved and _repath_timer < 0.45):
+		_repath_timer = randf_range(0.6, 1.0)
+		_path = nav.find_path(pos, goal)
+		_path_i = 0
+		_path_goal = goal
+		repaths += 1
+	while _path_i < _path.size() - 1 and Vector2(_path[_path_i].x - pos.x, _path[_path_i].z - pos.z).length() < 0.8:
+		_path_i += 1
+	if _path.is_empty():
+		return Vector3.ZERO
+	var target := _path[_path_i]
+	var d2 := Vector3(target.x - pos.x, 0.0, target.z - pos.z)
+	return d2.normalized() if d2.length() > 0.05 else Vector3.ZERO
+
+
+## Keep a little distance from other soldiers so squads do not jam in gaps.
+func _separation() -> Vector3:
+	var push := Vector3.ZERO
+	for e in game.enemies:
+		if e == self or not is_instance_valid(e):
+			continue
+		var d: Vector3 = global_position - e.global_position
+		d.y = 0.0
+		var l := d.length()
+		if l < 1.6 and l > 0.01:
+			push += d / l * (1.6 - l)
+	return push
+
+
+## Detect "trying to move but not getting anywhere" and recover: side-step, re-plan, and after
+## repeated failures pick a fresh patrol post.
+func _check_stuck(delta: float, speed: float) -> void:
+	if speed < 0.5 or _unstick_timer > 0.0:
+		_stuck_clock = 0.0
+		_stuck_from = global_position
+		return
+	_stuck_clock += delta
+	if _stuck_clock < 0.8:
+		return
+	var moved := Vector2(global_position.x - _stuck_from.x, global_position.z - _stuck_from.z).length()
+	if moved < speed * _stuck_clock * 0.25:
+		stuck_events += 1
+		_stuck_streak += 1
+		var fwd := Vector3(velocity.x, 0, velocity.z).normalized()
+		if fwd == Vector3.ZERO:
+			fwd = -global_transform.basis.z
+		var side := Vector3(-fwd.z, 0, fwd.x) * (1.0 if randf() < 0.5 else -1.0)
+		_unstick_dir = (side - fwd * 0.6).normalized()
+		_unstick_timer = 0.6
+		if game.nav != null:
+			# Remember what we bumped into so the next plan goes around it.
+			game.nav.block_temporarily(global_position + fwd * 0.9, game.mission_time)
+		_path = PackedVector3Array()
+		_repath_timer = 0.0
+		if _stuck_streak >= 3:
+			_stuck_streak = 0
+			if state == State.PATROL and game.zone != null:
+				_set_origin(game.zone.random_point_in_target())
+	else:
+		_stuck_streak = 0
+	_stuck_clock = 0.0
+	_stuck_from = global_position
 
 
 func _face(dir: Vector3, delta: float) -> void:
@@ -299,6 +434,9 @@ func _shoot(dist: float) -> void:
 	_muzzle.light_energy = 4.0
 	_muzzle.visible = true
 	_flash_mesh.rotation.z = randf() * TAU
+	shots_fired += 1
+	if game.audio:
+		game.audio.play_at("shot_enemy", global_position + Vector3(0, 1.3, 0), 0.0, 0.08)
 	var chance := BASE_HIT_CHANCE * clampf(1.25 - dist / ATTACK_RANGE, 0.3, 1.0)
 	if game.is_player_moving_fast():
 		chance *= 0.6

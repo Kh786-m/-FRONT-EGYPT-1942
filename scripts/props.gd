@@ -5,6 +5,7 @@ extends RefCounted
 
 const G := preload("res://scripts/graphics.gd")
 const Terrain := preload("res://scripts/terrain.gd")
+const MeshKit := preload("res://scripts/meshkit.gd")
 
 const SAND := Color("#E4D2B0")
 const KHAKI := Color("#8A7048")
@@ -309,57 +310,202 @@ static func _cylm(r: float, h: float, seg := 14) -> CylinderMesh:
 	return c
 
 
-## Burnt-out desert tank (Crusader / Panzer III silhouette). Returns the body and its footprint.
+## Burnt-out desert tank. Variant 0: Panzer III-style (6 small road wheels, return rollers,
+## boxy turret with cupola and stowage bin). Variant 1: Crusader-style (5 big Christie wheels,
+## side skirts, angular low turret, long thin 2-pdr gun). Built with the mesh kit: bevelled
+## armour plates, a swept track band with grousers, wheels with hubs, sprocket teeth, mantlet,
+## tools and jerry cans, all merged into a single mesh (one surface per material).
 static func add_tank(parent: Node3D, pos: Vector3, yaw: float, variant := 0) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	parent.add_child(body)
 	var gy := Terrain.footprint_min(pos, Vector3(6.4, 0, 3.2))
-	body.position = Vector3(pos.x, gy - 0.18, pos.z)
-	body.rotation = Vector3(randf_range(-0.04, 0.04), yaw, randf_range(-0.06, 0.06))
-	var paint := Color(0.5, 0.46, 0.34) if variant % 2 == 0 else Color(0.42, 0.42, 0.34)
-	var hull := G.pbr("metal_rust", paint, 0.6, true, 0.75, 0.3)
-	var scorched := G.pbr("metal_rust", Color(0.16, 0.14, 0.12), 0.6, true, 0.9, 0.2)
-	var track := G.pbr("metal_rust", Color(0.2, 0.18, 0.16), 1.6, true, 0.75, 0.6)
-	# Lower hull, sloped glacis and rear deck.
-	_part(body, _boxm(Vector3(4.6, 0.9, 2.1)), Vector3(-0.2, 0.95, 0), Vector3.ZERO, hull)
-	_part(body, _boxm(Vector3(1.5, 0.12, 2.1)), Vector3(2.65, 1.05, 0), Vector3(0, 0, -0.62), hull)
-	_part(body, _boxm(Vector3(1.0, 0.12, 2.1)), Vector3(2.55, 0.55, 0), Vector3(0, 0, 0.75), hull)
-	_part(body, _boxm(Vector3(1.6, 0.08, 1.9)), Vector3(-1.6, 1.43, 0), Vector3.ZERO, scorched)
-	_part(body, _boxm(Vector3(1.1, 0.35, 1.5)), Vector3(0.9, 1.55, 0), Vector3.ZERO, hull)
-	for s in [-1.0, 1.0]:
-		# Track run, mudguard, road wheels, drive sprocket.
-		_part(body, _boxm(Vector3(5.4, 0.18, 0.55)), Vector3(0, 0.85, s * 1.32), Vector3.ZERO, track)
-		_part(body, _boxm(Vector3(5.6, 0.06, 0.7)), Vector3(0, 1.42, s * 1.3), Vector3.ZERO, hull)
-		_part(body, _boxm(Vector3(5.4, 0.12, 0.5)), Vector3(0, 0.08, s * 1.32), Vector3.ZERO, track)
-		for i in range(6):
-			_part(body, _cylm(0.33, 0.22, 14), Vector3(-2.1 + i * 0.84, 0.4, s * 1.32), Vector3(PI * 0.5, 0, 0), track)
-			_part(body, _cylm(0.12, 0.24, 8), Vector3(-2.1 + i * 0.84, 0.4, s * 1.32), Vector3(PI * 0.5, 0, 0), hull)
-		_part(body, _cylm(0.38, 0.22, 10), Vector3(2.6, 0.6, s * 1.32), Vector3(PI * 0.5, 0, 0), scorched)
-		_part(body, _cylm(0.3, 0.22, 10), Vector3(-2.75, 0.62, s * 1.32), Vector3(PI * 0.5, 0, 0), track)
-	# Turret knocked askew by the hit that stopped it.
-	var turret := Node3D.new()
-	body.add_child(turret)
-	turret.position = Vector3(-0.3, 1.78, 0.15)
-	turret.rotation = Vector3(0.1, randf_range(0.4, 1.6), -0.14)
-	var tmesh := CylinderMesh.new()
-	tmesh.top_radius = 0.82
-	tmesh.bottom_radius = 1.0
-	tmesh.height = 0.7
-	tmesh.radial_segments = 6
-	tmesh.rings = 1
-	_part(turret, tmesh, Vector3(0, 0.35, 0), Vector3.ZERO, hull)
-	_part(turret, _boxm(Vector3(0.9, 0.55, 1.3)), Vector3(-0.95, 0.33, 0), Vector3.ZERO, scorched)
-	_part(turret, _boxm(Vector3(0.35, 0.45, 0.7)), Vector3(0.95, 0.32, 0), Vector3.ZERO, hull)
-	_part(turret, _cylm(0.075, 2.4, 10), Vector3(2.25, 0.32, 0), Vector3(0, 0, PI * 0.5 + 0.1), track)
-	_part(turret, _cylm(0.3, 0.3, 10), Vector3(-0.2, 0.8, 0.25), Vector3.ZERO, hull)
-	_part(turret, _cylm(0.32, 0.05, 10), Vector3(-0.2, 0.97, 0.25), Vector3(0.6, 0, 0), scorched)
+	body.position = Vector3(pos.x, gy - 0.12, pos.z)
+	body.rotation = Vector3(randf_range(-0.03, 0.03), yaw, randf_range(-0.05, 0.05))
+	var k := MeshKit.new()
+	var desert := variant % 2 == 0
+	var paint := G.pbr("metal_rust", Color(0.56, 0.54, 0.44) if desert else Color(0.5, 0.52, 0.46), 0.6, true, 0.72, 0.25)
+	var paint2 := G.pbr("metal_rust", Color(0.44, 0.42, 0.35) if desert else Color(0.4, 0.42, 0.38), 0.6, true, 0.8, 0.25)
+	var scorched := G.pbr("metal_rust", Color(0.17, 0.14, 0.12), 0.6, true, 0.92, 0.2)
+	var track := G.pbr("metal_rust", Color(0.26, 0.23, 0.2), 1.6, true, 0.7, 0.65)
+	var rubber := G.flat(Color(0.09, 0.085, 0.08), 0.95)
+	var steel := G.pbr("metal_rust", Color(0.22, 0.21, 0.2), 2.0, true, 0.5, 0.8)
+	var wood := G.pbr("wood", Color(0.75, 0.6, 0.45), 2.0, true, 0.85)
+	var can := G.pbr("metal_rust", Color(0.42, 0.4, 0.3), 1.5, true, 0.7, 0.3)
+	if desert:
+		_panzer(k, paint, paint2, scorched, track, rubber, steel, wood, can)
+	else:
+		_crusader(k, paint, paint2, scorched, track, rubber, steel, wood, can)
+	var mi := k.instance(body)
+	mi.name = "TankMesh"
+	body.set_meta("kind", "tank")
 	var col := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(6.2, 2.4, 3.3)
+	shape.size = Vector3(6.0, 2.3, 3.1)
 	col.shape = shape
-	col.position = Vector3(0, 1.2, 0)
+	col.position = Vector3(0, 1.15, 0)
 	body.add_child(col)
 	return body
+
+
+static func _v2(arr: Array) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for a in arr:
+		out.append(Vector2(a[0], a[1]))
+	return out
+
+
+## Wheel lying along Z at `c`: rubber tyre, steel disc, hub cap and bolt ring.
+static func _wheel(k: MeshKit, c: Vector3, r: float, w: float, rubber: Material, disc: Material, steel: Material, side: float) -> void:
+	var rx := Vector3(PI * 0.5, 0, 0)
+	k.cyl(r, r, w, c, rubber, rx, 18)
+	k.cyl(r * 0.78, r * 0.78, w + 0.02, c, disc, rx, 18)
+	k.cyl(r * 0.34, r * 0.4, w + 0.08, c + Vector3(0, 0, side * 0.02), steel, rx, 10)
+	for b in range(6):
+		var a := TAU * b / 6.0
+		k.cyl(0.018, 0.018, w + 0.1, c + Vector3(cos(a) * r * 0.55, sin(a) * r * 0.55, side * 0.01), steel, rx, 5)
+
+
+static func _sprocket(k: MeshKit, c: Vector3, r: float, w: float, mat: Material, steel: Material) -> void:
+	var rx := Vector3(PI * 0.5, 0, 0)
+	k.cyl(r * 0.85, r * 0.85, w, c, mat, rx, 16)
+	k.cyl(r * 0.35, r * 0.35, w + 0.1, c, steel, rx, 10)
+	for t in range(12):
+		var a := TAU * t / 12.0
+		k.box(Vector3(0.07, 0.09, w * 0.7), c + Vector3(cos(a), sin(a), 0) * r * 0.9, mat, Vector3(0, 0, a))
+
+
+## Track band around the wheel set, plus grousers on the tread face.
+static func _track(k: MeshKit, path: PackedVector2Array, z: float, width: float, track: Material, steel: Material) -> void:
+	k.band(path, 0.06, width, Transform3D(Basis.IDENTITY, Vector3(0, 0, z)), track)
+	var outer := MeshKit._inset(path, -0.06)
+	for p in MeshKit.resample(outer, 0.17):
+		var pt: Vector2 = p[0]
+		var d: Vector2 = p[1]
+		k.box(Vector3(0.05, 0.035, width * 0.96), Vector3(pt.x, pt.y, z), steel, Vector3(0, 0, atan2(d.y, d.x)))
+
+
+static func _jerrycan(k: MeshKit, pos: Vector3, mat: Material, rot := Vector3.ZERO) -> void:
+	k.bbox(Vector3(0.34, 0.46, 0.16), pos, mat, 0.03, rot)
+	k.box(Vector3(0.12, 0.05, 0.03), pos + Vector3(0, 0.25, 0).rotated(Vector3.UP, rot.y), mat, rot)
+
+
+static func _panzer(k: MeshKit, paint: Material, paint2: Material, scorched: Material, track: Material, rubber: Material, steel: Material, wood: Material, can: Material) -> void:
+	# Lower + upper hull side profile (x forward, y up), bevelled armour.
+	var hull := _v2([[-2.55, 0.5], [2.2, 0.5], [2.72, 0.92], [2.72, 1.18], [2.28, 1.4], [2.16, 1.78], [-2.3, 1.78], [-2.62, 1.48]])
+	k.extrude(hull, 1.92, 0.06, Transform3D(), paint)
+	# Superstructure over the tracks (wider upper hull) and fenders.
+	k.extrude(_v2([[-2.35, 1.38], [2.15, 1.38], [2.12, 1.76], [-2.3, 1.76]]), 2.7, 0.05, Transform3D(), paint)
+	for s in [-1.0, 1.0]:
+		k.bbox(Vector3(5.55, 0.04, 0.44), Vector3(0.05, 1.37, s * 1.2), paint2, 0.01)
+		k.bbox(Vector3(0.45, 0.04, 0.44), Vector3(2.85, 1.25, s * 1.2), paint2, 0.01, Vector3(0, 0, -0.45))
+		# Running gear: 6 road wheels, 3 return rollers, front sprocket, rear idler.
+		var z: float = s * 1.2
+		for i in range(6):
+			_wheel(k, Vector3(-1.85 + i * 0.68, 0.36, z), 0.27, 0.2, rubber, paint2, steel, s)
+		for i in range(3):
+			k.cyl(0.09, 0.09, 0.16, Vector3(-1.4 + i * 1.2, 1.12, z), rubber, Vector3(PI * 0.5, 0, 0), 10)
+		_sprocket(k, Vector3(2.38, 0.78, z), 0.36, 0.2, paint2, steel)
+		_wheel(k, Vector3(-2.48, 0.72, z), 0.29, 0.18, steel, paint2, steel, s)
+		var path := _v2([[-2.5, 0.38], [-2.82, 0.74], [-2.5, 1.04], [-1.4, 1.22], [1.0, 1.22], [2.38, 1.17], [2.75, 0.82], [2.45, 0.42], [1.6, 0.05], [-1.85, 0.05]])
+		_track(k, path, z, 0.38, track, steel)
+		# Tow cable + spare road wheel + tools on the side of the superstructure.
+		k.cyl(0.022, 0.022, 3.6, Vector3(-0.3, 1.58, s * 1.36), steel, Vector3(0, 0, PI * 0.5), 6)
+		k.bbox(Vector3(1.1, 0.06, 0.06), Vector3(0.8, 1.48, s * 1.37), wood, 0.01)
+	# Driver's visor, hull MG ball, headlights, spare track links on the glacis.
+	k.bbox(Vector3(0.12, 0.13, 0.42), Vector3(2.26, 1.55, 0.45), steel, 0.02, Vector3(0, 0, -0.35))
+	k.sphere(0.12, Vector3(2.25, 1.55, -0.45), paint2)
+	k.cyl(0.02, 0.02, 0.35, Vector3(2.45, 1.55, -0.45), steel, Vector3(0, 0, PI * 0.5), 6)
+	for s in [-1.0, 1.0]:
+		k.cyl(0.07, 0.07, 0.1, Vector3(2.55, 1.32, s * 0.75), steel, Vector3(0, 0, PI * 0.5), 10)
+	for i in range(6):
+		k.bbox(Vector3(0.05, 0.14, 0.34), Vector3(2.55, 1.0 + i * 0.0, -0.8 + i * 0.32), track, 0.01, Vector3(0, 0, 0.55))
+	# Engine deck: hatches, grilles, exhaust muffler, jerry cans.
+	k.bbox(Vector3(1.6, 0.06, 1.7), Vector3(-1.4, 1.8, 0), scorched, 0.02)
+	for i in range(7):
+		k.box(Vector3(0.05, 0.04, 0.9), Vector3(-2.1 + i * 0.12, 1.84, 0.4), steel)
+	for s in [-1.0, 1.0]:
+		k.bbox(Vector3(0.7, 0.05, 0.6), Vector3(-0.8, 1.82, s * 0.5), paint2, 0.015)
+	k.cyl(0.14, 0.14, 1.3, Vector3(-2.7, 1.15, 0), scorched, Vector3(PI * 0.5, 0, 0), 12)
+	k.cyl(0.05, 0.05, 0.25, Vector3(-2.7, 1.33, 0.35), scorched, Vector3.ZERO, 8)
+	_jerrycan(k, Vector3(-2.4, 1.62, 1.2), can)
+	_jerrycan(k, Vector3(-2.0, 1.62, 1.2), can)
+	_jerrycan(k, Vector3(-2.4, 1.62, -1.2), can, Vector3(0, 0, 0.6))
+	# Turret (knocked askew by the hit that stopped it).
+	var tx := Transform3D(Basis.from_euler(Vector3(0.08, randf_range(0.4, 1.6), -0.12)), Vector3(-0.15, 1.78, 0.1))
+	var t := MeshKit.new()
+	var turret := _v2([[-0.95, 0.0], [0.82, 0.0], [0.98, 0.22], [0.86, 0.66], [-0.88, 0.66], [-1.02, 0.28]])
+	t.extrude(turret, 1.62, 0.16, Transform3D(), paint)
+	t.bbox(Vector3(0.6, 0.48, 1.42), Vector3(-1.25, 0.34, 0), paint2, 0.04) # stowage bin
+	t.bbox(Vector3(0.24, 0.5, 0.86), Vector3(1.02, 0.33, 0), paint, 0.05) # mantlet
+	t.cyl(0.055, 0.06, 2.0, Vector3(2.1, 0.32, 0), steel, Vector3(0, 0, PI * 0.5), 12)
+	t.cyl(0.08, 0.08, 0.32, Vector3(1.28, 0.32, 0), paint, Vector3(0, 0, PI * 0.5), 12)
+	t.cyl(0.075, 0.075, 0.12, Vector3(3.08, 0.32, 0), steel, Vector3(0, 0, PI * 0.5), 12)
+	t.cyl(0.022, 0.022, 0.5, Vector3(1.3, 0.3, 0.26), steel, Vector3(0, 0, PI * 0.5), 6)
+	# Commander's cupola with vision slits and open hatch.
+	t.cyl(0.3, 0.32, 0.26, Vector3(-0.55, 0.79, 0), paint, Vector3.ZERO, 16)
+	t.cyl(0.305, 0.305, 0.05, Vector3(-0.55, 0.8, 0), scorched, Vector3.ZERO, 16, false)
+	t.cyl(0.28, 0.28, 0.04, Vector3(-0.55, 1.2, 0.34), paint2, Vector3(1.45, 0, 0), 16)
+	# Side hatches, vision ports, smoke dischargers.
+	for s in [-1.0, 1.0]:
+		t.bbox(Vector3(0.42, 0.38, 0.05), Vector3(0.05, 0.35, s * 0.8), paint2, 0.015)
+		t.bbox(Vector3(0.12, 0.06, 0.05), Vector3(0.55, 0.45, s * 0.79), scorched, 0.01)
+	for i in range(3):
+		t.cyl(0.04, 0.04, 0.2, Vector3(-1.48, 0.5, -0.4 + i * 0.4), steel, Vector3(0, 0, 0.5), 8)
+	_merge(k, t, tx)
+
+
+static func _crusader(k: MeshKit, paint: Material, paint2: Material, scorched: Material, track: Material, rubber: Material, steel: Material, wood: Material, can: Material) -> void:
+	var hull := _v2([[-2.85, 0.48], [2.35, 0.48], [2.9, 0.86], [2.9, 1.04], [2.5, 1.42], [-2.75, 1.42], [-2.95, 1.12]])
+	k.extrude(hull, 2.0, 0.06, Transform3D(), paint)
+	k.extrude(_v2([[-2.75, 1.08], [2.45, 1.08], [2.4, 1.4], [-2.72, 1.4]]), 2.72, 0.04, Transform3D(), paint)
+	for s in [-1.0, 1.0]:
+		var z: float = s * 1.2
+		for i in range(5):
+			_wheel(k, Vector3(-2.15 + i * 1.07, 0.47, z), 0.42, 0.22, rubber, paint2, steel, s)
+		_sprocket(k, Vector3(-2.75, 0.72, z), 0.34, 0.2, paint2, steel)
+		_wheel(k, Vector3(2.62, 0.72, z), 0.3, 0.18, steel, paint2, steel, s)
+		var path := _v2([[-2.78, 0.36], [-3.1, 0.72], [-2.78, 1.06], [-2.15, 0.94], [2.2, 0.94], [2.62, 1.03], [2.95, 0.72], [2.62, 0.4], [1.92, 0.04], [-2.15, 0.04]])
+		_track(k, path, z, 0.4, track, steel)
+		# Side skirts with lightening holes (dark ports) hide the top run.
+		k.bbox(Vector3(5.3, 0.36, 0.04), Vector3(-0.1, 1.17, s * 1.44), paint2, 0.012)
+		for i in range(5):
+			k.cyl(0.07, 0.07, 0.03, Vector3(-2.15 + i * 1.07, 1.13, s * 1.465), scorched, Vector3(PI * 0.5, 0, 0), 10)
+		k.cyl(0.02, 0.02, 3.2, Vector3(-0.3, 1.5, s * 1.38), steel, Vector3(0, 0, PI * 0.5), 6)
+	# Auxiliary MG turret (Crusader I), driver's hatch, headlamps.
+	k.cyl(0.26, 0.3, 0.36, Vector3(1.75, 1.6, -0.5), paint, Vector3.ZERO, 8)
+	k.cyl(0.02, 0.02, 0.45, Vector3(2.1, 1.62, -0.5), steel, Vector3(0, 0, PI * 0.5), 6)
+	k.bbox(Vector3(0.55, 0.06, 0.6), Vector3(1.9, 1.44, 0.45), paint2, 0.015)
+	for s in [-1.0, 1.0]:
+		k.cyl(0.08, 0.08, 0.12, Vector3(2.7, 1.2, s * 0.85), steel, Vector3(0, 0, PI * 0.5), 10)
+	# Engine deck with louvres, rear stowage and jerry cans (the famous desert "flimsies").
+	k.bbox(Vector3(2.2, 0.05, 1.8), Vector3(-1.5, 1.44, 0), scorched, 0.02)
+	for i in range(10):
+		k.box(Vector3(0.05, 0.04, 1.4), Vector3(-2.45 + i * 0.2, 1.48, 0), steel)
+	k.bbox(Vector3(0.5, 0.42, 2.0), Vector3(-3.05, 1.2, 0), paint2, 0.03)
+	for i in range(4):
+		_jerrycan(k, Vector3(-3.38, 1.15, -0.75 + i * 0.5), can, Vector3(0, PI * 0.5, 0))
+	# Low angular turret (bevelled 8-sided plan extruded upward).
+	var tx := Transform3D(Basis.from_euler(Vector3(0.06, randf_range(-1.6, -0.4), 0.1)), Vector3(0.15, 1.42, 0))
+	var t := MeshKit.new()
+	var plan := _v2([[-0.95, -0.55], [-0.6, -0.85], [0.6, -0.8], [0.95, -0.5], [0.95, 0.5], [0.6, 0.8], [-0.6, 0.85], [-0.95, 0.55]])
+	# Extrude along Y: rotate profile plane (XY) so its Y becomes Z.
+	t.extrude(plan, 0.62, 0.14, Transform3D(Basis.from_euler(Vector3(PI * 0.5, 0, 0)), Vector3(0, 0.31, 0)), paint)
+	t.bbox(Vector3(0.22, 0.42, 0.62), Vector3(1.02, 0.3, 0), paint2, 0.06) # mantlet
+	t.cyl(0.035, 0.04, 1.75, Vector3(1.95, 0.3, 0), steel, Vector3(0, 0, PI * 0.5), 10)
+	t.cyl(0.02, 0.02, 0.45, Vector3(1.25, 0.28, 0.2), steel, Vector3(0, 0, PI * 0.5), 6)
+	t.cyl(0.26, 0.28, 0.1, Vector3(-0.2, 0.66, 0.2), paint2, Vector3.ZERO, 12)
+	t.bbox(Vector3(0.5, 0.05, 0.5), Vector3(-0.3, 0.86, -0.3), paint2, 0.012, Vector3(1.1, 0, 0))
+	t.bbox(Vector3(0.45, 0.32, 1.3), Vector3(-1.15, 0.28, 0), paint2, 0.03) # turret bustle box
+	_merge(k, t, tx)
+
+
+## Bake a sub-kit (e.g. the turret) into the parent kit with a transform.
+static func _merge(k: MeshKit, sub: MeshKit, xf: Transform3D) -> void:
+	for key in sub._parts.keys():
+		var b: Dictionary = sub._parts[key]
+		var v: PackedVector3Array = b["v"]
+		var n: PackedVector3Array = b["n"]
+		k.add_tris(v, n, xf, b["mat"])
 
 
 ## Abandoned Bedford/Opel-style lorry, half sunk in the sand.

@@ -161,3 +161,38 @@ func tick(now: float) -> void:
 		if now >= float(_temp_blocks[c]):
 			grid.set_point_solid(c, false)
 			_temp_blocks.erase(c)
+
+
+## Destination claims: each soldier claims the cell it is heading for, so posts in a small
+## zone are spread out instead of everyone converging on the same spot.
+var _claims := {} # Vector2i -> instance id
+var _claim_of := {} # instance id -> Vector2i
+
+
+func claim_near(p: Vector3, who: Object, max_r := 6) -> Vector3:
+	var me := who.get_instance_id()
+	var c0 := nearest_free(cell_of(p))
+	for r in range(0, max_r + 1):
+		for x in range(c0.x - r, c0.x + r + 1):
+			for z in range(c0.y - r, c0.y + r + 1):
+				if maxi(absi(x - c0.x), absi(z - c0.y)) != r:
+					continue
+				var c := Vector2i(x, z)
+				if not grid.is_in_boundsv(c) or grid.is_point_solid(c):
+					continue
+				var owner = _claims.get(c, 0)
+				if owner != 0 and owner != me and is_instance_id_valid(owner):
+					continue
+				release_claim(who)
+				_claims[c] = me
+				_claim_of[me] = c
+				var w := world_of(c)
+				return Vector3(w.x, p.y, w.z)
+	return nearest_free_point(p)
+
+
+func release_claim(who: Object) -> void:
+	var me := who.get_instance_id()
+	if _claim_of.has(me):
+		_claims.erase(_claim_of[me])
+		_claim_of.erase(me)

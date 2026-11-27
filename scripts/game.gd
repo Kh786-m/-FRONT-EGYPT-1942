@@ -13,6 +13,7 @@ const Terrain := preload("res://scripts/terrain.gd")
 const Props := preload("res://scripts/props.gd")
 const Fx := preload("res://scripts/fx.gd")
 const NavScript := preload("res://scripts/nav.gd")
+const CoverScript := preload("res://scripts/cover.gd")
 const AudioScript := preload("res://scripts/audio.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
@@ -108,6 +109,7 @@ var nearby_crate: Node3D = null
 var loot_rng := RandomNumberGenerator.new()
 var placement := 0
 var zone_kills := 0
+var last_player_attacker: Node3D = null
 var pickup_toast := ""
 var pickup_toast_timer := 0.0
 var reload_timer := 0.0
@@ -130,6 +132,16 @@ var joy_home := Vector2.ZERO
 var joy_zone := Rect2()
 var touch_layout_size := Vector2.ZERO
 var nav: RefCounted
+var cover: RefCounted
+var kill_feed: Label
+var kill_feed_entries: Array = [] # [{text, t}]
+var kills_by_enemies := 0
+## Battle royale: soldiers fight each other too (tests can switch it off to isolate one soldier).
+var free_for_all := true
+var enemy_loots := 0
+const CALLSIGNS := ["Hans", "Tommy", "Fritz", "Jock", "Klaus", "Archie", "Otto", "Bertie", "Kurt", "Alfie", "Ernst", "Monty", "Wolf", "Reggie", "Karl", "Harry", "Dieter", "Percy", "Gunther", "Stan"]
+const PLAYER_CALLSIGN := "خالد"
+const ZONE_CALLSIGN := "الدايرة"
 var step_distance := 0.0
 var idle_time := 0.0
 var _style_on: StyleBoxFlat
@@ -165,6 +177,8 @@ func _ready() -> void:
 func _build_nav() -> void:
 	nav = NavScript.new()
 	nav.build(obstacles, func(x: float, z: float) -> float: return Terrain.height(x, z))
+	cover = CoverScript.new()
+	cover.build(obstacles, nav, func(x: float, z: float) -> float: return Terrain.height(x, z))
 
 
 func is_playing() -> bool:
@@ -750,18 +764,29 @@ func _create_enemies() -> void:
 		add_child(enemy)
 		enemy.position = p
 		enemy.setup(self, p, Vector3(1, 0, 0) if i % 2 == 0 else Vector3(0, 0, 1), float(i) * 0.9, uniform, helmet, metal, ember_mat)
+		enemy.callsign = CALLSIGNS[i % CALLSIGNS.size()]
+		enemy.equip("webley" if i % 4 == 3 else "lee_enfield")
 		enemy.died.connect(_on_enemy_died)
 		enemies.append(enemy)
 
 
 func _on_enemy_died(enemy: CharacterBody3D, by_player: bool) -> void:
 	enemies.erase(enemy)
+	var cause: String = enemy.death_cause
 	if by_player:
 		score += 1
 		experience_points += 25
 		reward_coins += 10
-	else:
+		add_kill_feed(PLAYER_CALLSIGN, enemy.callsign, Weapons.get_weapon(current_weapon()).get("name", ""))
+	elif cause == "zone" or cause == "":
 		zone_kills += 1
+		add_kill_feed(ZONE_CALLSIGN, enemy.callsign, "")
+	else:
+		kills_by_enemies += 1
+		var killer = enemy.last_attacker
+		var kname: String = killer.callsign if killer != null and is_instance_valid(killer) and "callsign" in killer else "?"
+		var kw: String = Weapons.get_weapon(killer.weapon)["name"] if killer != null and is_instance_valid(killer) and "weapon" in killer else ""
+		add_kill_feed(kname, enemy.callsign, kw)
 	# Fallen soldiers leave a small supply drop.
 	_spawn_crate(enemy.global_position, LootScript.roll_enemy_drop(loot_rng), true)
 	if enemies.is_empty() and state == GameState.PLAYING:
@@ -769,9 +794,11 @@ func _on_enemy_died(enemy: CharacterBody3D, by_player: bool) -> void:
 
 
 ## Damage from enemy fire. Armour soaks part of it while it lasts.
-func damage_player(amount: float, _from_pos: Vector3) -> void:
+func damage_player(amount: float, _from_pos: Vector3, attacker: Node3D = null) -> void:
 	if state != GameState.PLAYING:
 		return
+	if attacker != null:
+		last_player_attacker = attacker
 	var dmg := float(amount)
 	if armor > 0.0:
 		var soaked := minf(armor, dmg * ARMOR_ABSORB)
@@ -793,7 +820,78 @@ func _apply_player_damage(dmg: float, flash: float) -> void:
 	since_damage = 0.0
 	damage_flash.color.a = maxf(damage_flash.color.a, flash)
 	if health <= 0.0:
+		if flash < 0.3 or last_player_attacker == null or not is_instance_valid(last_player_attacker):
+			add_kill_feed(ZONE_CALLSIGN, PLAYER_CALLSIGN, "")
+		else:
+			add_kill_feed(last_player_attacker.callsign, PLAYER_CALLSIGN, Weapons.get_weapon(last_player_attacker.weapon)["name"])
 		_end_mission(false)
+
+
+## Kill feed (top centre): "KILLER » VICTIM (WEAPON)", last 5 entries, each fades after 6 s.
+func add_kill_feed(killer: String, victim: String, weapon_name: String) -> void:
+	var line := "%s  »  %s" % [killer, victim]
+	if weapon_name != "":
+		line += "  (%s)" % weapon_name
+	kill_feed_entries.append({"text": line, "t": mission_time})
+	while kill_feed_entries.size() > 5:
+		kill_feed_entries.pop_front()
+	_refresh_kill_feed()
+
+
+func _refresh_kill_feed() -> void:
+	if kill_feed == null:
+		return
+	var keep: Array = []
+	for k in kill_feed_entries:
+		if mission_time - float(k["t"]) < 6.0:
+			keep.append(k)
+	kill_feed_entries = keep
+	var lines: PackedStringArray = []
+	for k in kill_feed_entries:
+		lines.append(k["text"])
+	kill_feed.text = "\n".join(lines)
+
+
+## A soldier reached a crate: take a better gun (leaving his old one) and/or a medkit.
+func enemy_loot(e: Node3D, crate: Node3D) -> void:
+	if not is_instance_valid(crate) or not is_instance_valid(e):
+		return
+	crate.remove_meta("claimed_by")
+	var took := false
+	var w: String = crate.contents.get("weapon", "")
+	if w != "" and EnemyScript.WEAPONS.has(w) and int(EnemyScript.WEAPONS[w]["tier"]) > e.weapon_tier():
+		var old: String = e.weapon
+		e.equip(w)
+		crate.put_weapon(old)
+		took = true
+	if int(crate.contents.get("medkits", 0)) > 0 and e.hit_points < 80.0:
+		crate.contents["medkits"] = int(crate.contents["medkits"]) - 1
+		e.hit_points = minf(e.MAX_HP, e.hit_points + 40.0)
+		took = true
+	if not took:
+		return
+	e.loots += 1
+	enemy_loots += 1
+	audio.play_at("pickup", crate.global_position, -6.0, 0.06)
+	crate.refresh_label()
+	if crate.is_empty():
+		loot_crates.erase(crate)
+		crate.queue_free()
+		if nearby_crate == crate:
+			nearby_crate = null
+
+
+## Enemy gunfire is loud too: soldiers nearby with nothing to shoot at come for the shooter.
+func on_enemy_shot(shooter: Node3D) -> void:
+	for e in enemies:
+		if e == shooter or not is_instance_valid(e):
+			continue
+		if e.target == null and e.global_position.distance_to(shooter.global_position) < SHOT_ALERT_RADIUS:
+			e.alert(shooter)
+	if audio != null and audio.has_method("duck"):
+		var d := shooter.global_position.distance_to(player.global_position)
+		if d < 40.0:
+			audio.duck(clampf(1.0 - d / 40.0, 0.2, 1.0) * 0.6)
 
 
 func alive_count() -> int:
@@ -889,6 +987,17 @@ func _create_ui() -> void:
 	minimap.size = Vector2(180, 180)
 	minimap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(minimap)
+	kill_feed = Label.new()
+	kill_feed.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	kill_feed.position = Vector2(-260, 46)
+	kill_feed.size = Vector2(520, 140)
+	kill_feed.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	kill_feed.add_theme_font_size_override("font_size", 18)
+	kill_feed.add_theme_color_override("font_color", BONE)
+	kill_feed.add_theme_color_override("font_outline_color", INK)
+	kill_feed.add_theme_constant_override("outline_size", 6)
+	kill_feed.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(kill_feed)
 	zone_label = Label.new()
 	zone_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
 	zone_label.position = Vector2(-560, 230)
@@ -1278,6 +1387,7 @@ func _update_hud() -> void:
 	weapon_label.text = "\n".join(lines)
 	status.text = "KILLS %d | XP %d | COINS %d | FPS %d" % [score, experience_points, reward_coins, Engine.get_frames_per_second()]
 	alive_label.text = "ALIVE %d  |  أحياء" % alive_count()
+	_refresh_kill_feed()
 	var zone_text: String = zone.status_text()
 	var outside: float = zone.distance_outside(player.global_position)
 	if outside > 0.0:

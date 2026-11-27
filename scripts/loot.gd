@@ -89,6 +89,20 @@ func take_weapon() -> String:
 	return w
 
 
+## Put a weapon into the crate (soldiers leave their old gun when they take a better one).
+func put_weapon(id: String) -> void:
+	if _weapon_model:
+		_weapon_model.queue_free()
+		_weapon_model = null
+	contents["weapon"] = id
+	if id != "":
+		_weapon_model = Node3D.new()
+		_weapon_model.position = Vector3(0, _model_y, 0)
+		add_child(_weapon_model)
+		Weapons.build_model(id, _weapon_model, 1.3)
+	refresh_label()
+
+
 func summary() -> String:
 	var parts: PackedStringArray = []
 	var w: String = contents.get("weapon", "")

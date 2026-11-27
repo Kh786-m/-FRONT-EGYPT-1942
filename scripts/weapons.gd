@@ -125,8 +125,21 @@ static func part_material(key: String) -> Material:
 ## Builds a procedural, PBR-textured model of the weapon under `parent`: bevelled receivers,
 ## extruded wooden stocks and grips with real silhouettes, fluted cylinders, cooling fins,
 ## ribbed magazines — merged into one mesh (one surface per material) for the phone.
+static var _mesh_cache := {}
+
+
 static func build_model(id: String, parent: Node3D, scale_factor := 1.0, shadows := true) -> void:
 	if not DATA.has(id):
+		return
+	# Built once per weapon and shared (enemies carry the same models as the player).
+	if _mesh_cache.has(id):
+		var cached := MeshInstance3D.new()
+		cached.mesh = _mesh_cache[id]
+		if not shadows:
+			cached.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(cached)
+		cached.name = "GunMesh"
+		cached.scale = Vector3.ONE * scale_factor
 		return
 	var k := MeshKit.new()
 	match id:
@@ -139,6 +152,7 @@ static func build_model(id: String, parent: Node3D, scale_factor := 1.0, shadows
 		"mp40":
 			_mp40(k)
 	var mi := k.instance(parent, shadows)
+	_mesh_cache[id] = mi.mesh
 	mi.name = "GunMesh"
 	mi.scale = Vector3.ONE * scale_factor
 

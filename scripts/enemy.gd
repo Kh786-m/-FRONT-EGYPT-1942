@@ -7,11 +7,23 @@ extends CharacterBody3D
 
 const G := preload("res://scripts/graphics.gd")
 const Fx := preload("res://scripts/fx.gd")
+const Weapons := preload("res://scripts/weapons.gd")
+const Audio := preload("res://scripts/audio.gd")
+## Soldier-side weapon stats. dmg_player is per hit on the player; dmg_soldier on other soldiers.
+const WEAPONS := {
+	"webley": {"interval": 1.1, "dmg_player": 5.0, "dmg_soldier": 24.0, "range": 15.0, "hit": 0.5, "mag": 6, "reload": 2.2, "tier": 0},
+	"lee_enfield": {"interval": 1.7, "dmg_player": 6.0, "dmg_soldier": 40.0, "range": 22.0, "hit": 0.55, "mag": 10, "reload": 2.6, "tier": 1},
+	"mp40": {"interval": 0.42, "dmg_player": 4.0, "dmg_soldier": 14.0, "range": 17.0, "hit": 0.42, "mag": 32, "reload": 2.3, "tier": 2},
+	"thompson": {"interval": 0.38, "dmg_player": 4.0, "dmg_soldier": 13.0, "range": 16.0, "hit": 0.42, "mag": 30, "reload": 2.4, "tier": 2},
+}
+const SMALL_ZONE := 22.0
+const SEPARATION := 2.1
+const LOOT_RANGE := 16.0
 const MUZZLE_POS := Vector3(0.14, 1.19, -1.05)
 
 signal died(enemy: CharacterBody3D, by_player: bool)
 
-enum State { PATROL, CHASE, ATTACK }
+enum State { PATROL, CHASE, ATTACK, COVER }
 
 const PATROL_SPEED := 1.6
 const CHASE_SPEED := 3.6
@@ -59,6 +71,30 @@ var _step_phase := 0.0
 var stuck_events := 0
 var repaths := 0
 var shots_fired := 0
+var cover_entries := 0
+var peeks := 0
+var hiding_time := 0.0
+var kills := 0
+var loots := 0
+var callsign := "SOLDIER"
+var weapon := "lee_enfield"
+## Combat: current hostile (player or another soldier), who hit us last, how we died.
+var target: Node3D = null
+var last_attacker: Node3D = null
+var death_cause := ""
+var _mag := 10
+var _reload_timer := 0.0
+var _under_fire := 0.0
+var _loot_timer := 1.0
+var _loot_crate = null
+var _post_key := Vector4.ZERO
+var _cover_point := Vector3.ZERO
+var _peek_point := Vector3.ZERO
+var _cover_phase := 0
+var _cover_timer := 0.0
+var _cover_cycles := 0
+var _cover_cooldown := 0.0
+var _gun_holder: Node3D
 
 
 func setup(p_game: Node3D, p_origin: Vector3, p_axis: Vector3, p_phase: float, uniform: Material, helmet: Material, metal: Material, ember: Material) -> void:
@@ -166,19 +202,10 @@ func _build_soldier(uniform: Material, helmet: Material, metal: Material) -> voi
 	_mesh(_body, _capsule(0.06, 0.4), Vector3(-0.08, 1.16, -0.38), uniform, Vector3(1.45, -0.6, 0.0))
 	_mesh(_body, _box(Vector3(0.08, 0.08, 0.1)), Vector3(0.17, 1.1, -0.44), skin)
 	_mesh(_body, _box(Vector3(0.08, 0.08, 0.1)), Vector3(0.05, 1.16, -0.56), skin)
-	var rifle := Node3D.new()
-	rifle.position = Vector3(0.12, 1.16, -0.45)
-	rifle.rotation = Vector3(0.03, 0.12, 0)
-	_body.add_child(rifle)
-	_mesh(rifle, _box(Vector3(0.05, 0.07, 0.75)), Vector3(0, 0, -0.12), wood)
-	_mesh(rifle, _box(Vector3(0.045, 0.11, 0.26)), Vector3(0, -0.03, 0.36), wood)
-	var barrel := CylinderMesh.new()
-	barrel.top_radius = 0.012
-	barrel.bottom_radius = 0.012
-	barrel.height = 0.36
-	barrel.radial_segments = 6
-	_mesh(rifle, barrel, Vector3(0, 0.025, -0.6), metal, Vector3(PI * 0.5, 0, 0))
-	_mesh(rifle, _box(Vector3(0.04, 0.04, 0.2)), Vector3(0, 0.05, 0.02), metal)
+	_gun_holder = Node3D.new()
+	_gun_holder.position = Vector3(0.12, 1.17, -0.3)
+	_gun_holder.rotation = Vector3(0.03, 0.12, 0)
+	_body.add_child(_gun_holder)
 
 
 func _animate(delta: float, speed: float) -> void:
@@ -199,14 +226,23 @@ func _animate(delta: float, speed: float) -> void:
 				game.audio.play_at("step", global_position, -6.0 + amount * 3.0, 0.12)
 
 
-## Called by the player's weapon. Returns true if this hit killed the enemy.
+## Called by the player's weapon. Returns true if this hit killed the soldier.
 func take_hit(damage: float) -> bool:
+	return take_hit_from(damage, game.player if game != null else null)
+
+
+## Damage from any combatant (the player or another soldier).
+func take_hit_from(damage: float, attacker: Node3D) -> bool:
 	if hit_points <= 0.0:
 		return false
 	hit_points -= damage
-	alert()
+	_under_fire = 3.5
+	last_attacker = attacker
+	if attacker != null and is_instance_valid(attacker) and attacker != self:
+		alert(attacker)
 	if hit_points <= 0.0:
-		_die(true)
+		death_cause = "player" if game != null and attacker == game.player else "enemy"
+		_die(death_cause == "player")
 		return true
 	return false
 
@@ -217,25 +253,111 @@ func take_zone_damage(damage: float) -> bool:
 		return false
 	hit_points -= damage
 	if hit_points <= 0.0:
+		death_cause = "zone"
 		_die(false)
 		return true
 	return false
 
 
 func _die(by_player: bool) -> void:
+	if game != null:
+		if game.nav != null:
+			game.nav.release_claim(self)
+		if game.cover != null:
+			game.cover.release(self)
 	if is_inside_tree() and get_parent() != null:
 		Fx.death_puff(get_parent(), global_position, 1.0)
 	died.emit(self, by_player)
 	queue_free()
 
 
-func alert() -> void:
-	if game and is_instance_valid(game.player):
-		_last_known = game.player.global_position
+## Something hostile is around: by default the player (gunfire noise), or a given attacker.
+func alert(attacker: Node3D = null) -> void:
+	if attacker == null and game and is_instance_valid(game.player):
+		attacker = game.player
+	if attacker != null and is_instance_valid(attacker):
+		if target == null or not is_instance_valid(target) or not _can_see:
+			target = attacker
+		_last_known = attacker.global_position
 	if state == State.PATROL:
 		state = State.CHASE
 		_repath_timer = 0.0
 	_lost_timer = 0.0
+
+
+## Equip a weapon (also updates the model in the soldier's hands).
+func equip(id: String) -> void:
+	if not WEAPONS.has(id):
+		return
+	weapon = id
+	_mag = int(WEAPONS[id]["mag"])
+	_reload_timer = 0.0
+	if _gun_holder != null:
+		for c in _gun_holder.get_children():
+			_gun_holder.remove_child(c)
+			c.queue_free()
+		Weapons.build_model(id, _gun_holder, 1.0, true)
+		var m: Vector3 = Weapons.DATA[id].get("muzzle", Vector3(0, 0, -0.6))
+		var mp := _gun_holder.position + _gun_holder.basis * m
+		_muzzle.position = mp
+		_flash_mesh.position = mp
+
+
+func weapon_tier() -> int:
+	return int(WEAPONS[weapon]["tier"])
+
+
+func is_reloading() -> bool:
+	return _reload_timer > 0.0
+
+
+func _valid(t) -> bool:
+	if t == null or not is_instance_valid(t):
+		return false
+	if game != null and t == game.player:
+		return game.is_playing()
+	return t.hit_points > 0.0
+
+
+## Pick the nearest visible hostile (player or any other soldier — battle royale).
+func _update_target() -> void:
+	var me := global_position
+	var cands: Array = []
+	if game.is_playing():
+		cands.append(game.player)
+	if game.free_for_all:
+		for e in game.enemies:
+			if e != self and is_instance_valid(e):
+				cands.append(e)
+	var near: Array = []
+	for c in cands:
+		var d: float = Vector2(c.global_position.x - me.x, c.global_position.z - me.z).length()
+		if d < DETECT_RANGE:
+			near.append([d, c])
+	near.sort_custom(func(a, b): return a[0] < b[0])
+	var keep := _valid(target)
+	var keep_d := INF
+	if keep:
+		keep_d = Vector2(target.global_position.x - me.x, target.global_position.z - me.z).length()
+	var found = null
+	var checks := 0
+	for pair in near:
+		if checks >= 3:
+			break
+		checks += 1
+		# Sticky: don't drop a visible target for one that is only slightly closer.
+		if keep and pair[1] != target and pair[0] > keep_d * 0.7:
+			continue
+		if _has_line_of_sight(pair[1]):
+			found = pair[1]
+			break
+	if found == null and keep and keep_d < DETECT_RANGE and _has_line_of_sight(target):
+		found = target
+	_can_see = found != null
+	if found != null:
+		target = found
+	elif not keep:
+		target = null
 
 
 func _physics_process(delta: float) -> void:
@@ -248,37 +370,59 @@ func _physics_process(delta: float) -> void:
 	_clock += delta
 	_fire_cooldown = maxf(0.0, _fire_cooldown - delta)
 	_repath_timer -= delta
-	var player: CharacterBody3D = game.player
-	var to_player := player.global_position - global_position
-	to_player.y = 0.0
-	var dist := to_player.length()
-	# Line-of-sight raycasts are throttled to keep mobile CPU cost low.
+	_under_fire = maxf(0.0, _under_fire - delta)
+	_loot_timer -= delta
+	if _reload_timer > 0.0:
+		_reload_timer -= delta
+		if _reload_timer <= 0.0:
+			_mag = int(WEAPONS[weapon]["mag"])
+	# Target scans (line-of-sight raycasts) are throttled to keep mobile CPU cost low.
 	_los_timer -= delta
 	if _los_timer <= 0.0:
-		_los_timer = 0.2
-		_can_see = dist < DETECT_RANGE and _has_line_of_sight(player)
+		_los_timer = 0.22 + randf() * 0.06
+		_update_target()
+	var has_target := _valid(target)
+	var tpos: Vector3 = target.global_position if has_target else _last_known
+	var to_t := tpos - global_position
+	to_t.y = 0.0
+	var dist := to_t.length()
 	var move_dir := Vector3.ZERO
 	var speed := 0.0
 	var zone: Node3D = game.zone
 	var outside_zone: bool = zone != null and not zone.is_inside(global_position)
-	# Keep the patrol post inside the circle the zone is closing toward (and off blocked cells).
-	if zone != null and Vector2(origin.x, origin.z).distance_to(zone.target_center) > zone.target_radius * 0.85:
-		_set_origin(zone.random_point_in_target())
+	_update_post(zone)
 	if outside_zone and state != State.ATTACK:
+		if state == State.COVER:
+			_leave_cover()
 		state = State.PATROL
 	match state:
 		State.PATROL:
 			if _can_see and not outside_zone:
-				alert()
-			var goal := origin + patrol_axis * sin(_clock * 0.5 + patrol_phase) * 3.0
+				alert(target)
+			var goal := _patrol_goal()
 			var to_goal := goal - global_position
 			to_goal.y = 0.0
+			# Soldiers at their post look around for better gear nearby.
+			if _loot_crate == null and to_goal.length() < 1.0 and _loot_timer <= 0.0 and not outside_zone:
+				_loot_timer = randf_range(0.8, 1.4)
+				_loot_crate = _find_loot()
+			if _loot_crate != null:
+				if not is_instance_valid(_loot_crate) or _loot_crate.is_queued_for_deletion():
+					_loot_crate = null
+				else:
+					goal = _loot_crate.global_position
+					to_goal = goal - global_position
+					to_goal.y = 0.0
+					if to_goal.length() < 1.8:
+						game.enemy_loot(self, _loot_crate)
+						_loot_crate = null
 			if to_goal.length() > 0.4:
 				move_dir = _steer_to(goal)
 				speed = CHASE_SPEED if outside_zone else (PATROL_SPEED if to_goal.length() < 4.0 else CHASE_SPEED * 0.7)
 		State.CHASE:
-			if _can_see:
-				_last_known = player.global_position
+			_loot_crate = null
+			if _can_see and has_target:
+				_last_known = tpos
 				_lost_timer = 0.0
 				if dist < ATTACK_RANGE:
 					state = State.ATTACK
@@ -287,21 +431,24 @@ func _physics_process(delta: float) -> void:
 				_lost_timer += delta
 				if _lost_timer > LOSE_SIGHT_TIME:
 					state = State.PATROL
+					target = null
 			var to_last := _last_known - global_position
 			to_last.y = 0.0
 			if to_last.length() > 1.0:
 				move_dir = _steer_to(_last_known)
 				speed = CHASE_SPEED
 		State.ATTACK:
-			if not _can_see or dist > ATTACK_RANGE * 1.15:
+			if not _can_see or not has_target or dist > ATTACK_RANGE * 1.15:
 				state = State.CHASE
 				_repath_timer = 0.0
 			else:
-				_last_known = player.global_position
+				_last_known = tpos
 				_lost_timer = 0.0
-				_face(to_player, delta)
-				if dist > KEEP_DISTANCE:
-					move_dir = _steer_to(player.global_position)
+				_face(to_t, delta)
+				if _wants_cover() and _try_take_cover(tpos):
+					pass
+				elif dist > KEEP_DISTANCE:
+					move_dir = _steer_to(tpos)
 					speed = CHASE_SPEED * 0.8
 				else:
 					# Hold the line and side-step so the soldier is not a static target.
@@ -309,12 +456,16 @@ func _physics_process(delta: float) -> void:
 					if _strafe_timer <= 0.0:
 						_strafe_timer = randf_range(1.2, 2.4)
 						_strafe_side = -_strafe_side
-					var side := Vector3(-to_player.z, 0, to_player.x).normalized() * _strafe_side
+					var side := Vector3(-to_t.z, 0, to_t.x).normalized() * _strafe_side
 					if game.nav == null or game.nav.is_walkable(global_position + side * 1.2):
 						move_dir = side
 						speed = PATROL_SPEED
-				if _fire_cooldown <= 0.0:
+				if state == State.ATTACK and _fire_cooldown <= 0.0:
 					_shoot(dist)
+		State.COVER:
+			var r := _cover_step(delta, has_target, tpos, dist)
+			move_dir = r[0]
+			speed = r[1]
 	# Stuck recovery overrides the planned direction for a moment.
 	if _unstick_timer > 0.0:
 		_unstick_timer -= delta
@@ -322,7 +473,13 @@ func _physics_process(delta: float) -> void:
 		speed = maxf(speed, PATROL_SPEED * 1.5)
 	elif move_dir != Vector3.ZERO:
 		move_dir = (move_dir + _separation() * 0.8).normalized()
-	if move_dir != Vector3.ZERO and state != State.ATTACK:
+	elif state == State.PATROL:
+		# Idle soldiers still drift apart if someone is standing on them.
+		var push := _separation()
+		if push.length() > 0.25:
+			move_dir = push.normalized()
+			speed = PATROL_SPEED * 0.6
+	if move_dir != Vector3.ZERO and state != State.ATTACK and not (state == State.COVER and _cover_phase == 2):
 		_face(move_dir, delta)
 	velocity.x = move_dir.x * speed
 	velocity.z = move_dir.z * speed
@@ -335,11 +492,162 @@ func _physics_process(delta: float) -> void:
 	_check_stuck(delta, speed)
 
 
+# ------------------------------------------------------------------ posts / final-zone spread
+## Small zones: every soldier gets its own slot on two rings around the centre (claimed on the
+## nav grid), instead of everyone patrolling to the same few metres.
+func _update_post(zone: Node3D) -> void:
+	if zone == null:
+		return
+	var tc: Vector2 = zone.target_center
+	var tr: float = zone.target_radius
+	if tr < SMALL_ZONE:
+		var n: int = maxi(1, game.enemies.size())
+		var slot: int = maxi(0, game.enemies.find(self))
+		var key := Vector4(tc.x, tc.y, tr, n)
+		if key != _post_key:
+			_post_key = key
+			var ring := 0.72 if slot % 2 == 0 else 0.4
+			var ang := TAU * float(slot) / float(n) + 0.37
+			var want := Vector3(tc.x + cos(ang) * tr * ring, 0.0, tc.y + sin(ang) * tr * ring)
+			origin = game.nav.claim_near(want, self) if game.nav != null else want
+			_repath_timer = 0.0
+	elif Vector2(origin.x, origin.z).distance_to(tc) > tr * 0.85:
+		_set_origin(zone.random_point_in_target())
+
+
+func _patrol_goal() -> Vector3:
+	var amp := 3.0
+	if game.zone != null and game.zone.target_radius < SMALL_ZONE:
+		amp = 0.6
+	return origin + patrol_axis * sin(_clock * 0.5 + patrol_phase) * amp
+
+
 func _set_origin(p: Vector3) -> void:
-	origin = game.nav.nearest_free_point(p) if game != null and game.nav != null else p
+	origin = game.nav.claim_near(p, self) if game != null and game.nav != null else p
 	_repath_timer = 0.0
 
 
+# ------------------------------------------------------------------ cover
+func _wants_cover() -> bool:
+	if game.cover == null or _cover_cooldown > _clock:
+		return false
+	return _reload_timer > 0.0 or (_under_fire > 0.0 and hit_points < 80.0)
+
+
+func _try_take_cover(threat: Vector3) -> bool:
+	var c: Dictionary = game.cover.find(global_position, threat, self, game.nav)
+	if c.is_empty():
+		_cover_cooldown = _clock + 2.0
+		return false
+	_cover_point = c["p"]
+	_peek_point = c["peek"]
+	_cover_phase = 0
+	_cover_cycles = 0
+	state = State.COVER
+	cover_entries += 1
+	_repath_timer = 0.0
+	return true
+
+
+func _leave_cover() -> void:
+	if game.cover != null:
+		game.cover.release(self)
+	_cover_cooldown = _clock + 3.0
+	_cover_phase = 0
+
+
+## COVER: 0 = run to the spot, 1 = hide (reload / wait), 2 = peek out and fire, then back.
+func _cover_step(delta: float, has_target: bool, tpos: Vector3, dist: float) -> Array:
+	if not has_target:
+		_lost_timer += delta
+		if _lost_timer > LOSE_SIGHT_TIME:
+			_leave_cover()
+			state = State.CHASE
+			return [Vector3.ZERO, 0.0]
+	else:
+		_lost_timer = 0.0
+		_last_known = tpos
+	_cover_timer -= delta
+	match _cover_phase:
+		0:
+			var d := Vector2(_cover_point.x - global_position.x, _cover_point.z - global_position.z).length()
+			if d < 0.7:
+				_cover_phase = 1
+				_cover_timer = maxf(_reload_timer, 0.0) + randf_range(0.8, 1.6)
+				if _mag < int(WEAPONS[weapon]["mag"]) and _reload_timer <= 0.0:
+					_reload_timer = float(WEAPONS[weapon]["reload"])
+					_cover_timer += _reload_timer
+				return [Vector3.ZERO, 0.0]
+			return [_steer_to(_cover_point), CHASE_SPEED]
+		1:
+			hiding_time += delta
+			if _cover_timer <= 0.0 and _reload_timer <= 0.0:
+				_cover_phase = 2
+				_cover_timer = randf_range(1.5, 2.6)
+				peeks += 1
+			var d1 := Vector2(_cover_point.x - global_position.x, _cover_point.z - global_position.z).length()
+			return [_steer_to(_cover_point) if d1 > 0.5 else Vector3.ZERO, PATROL_SPEED]
+		2:
+			if has_target:
+				var to_t := tpos - global_position
+				to_t.y = 0.0
+				_face(to_t, delta)
+				if _can_see and _fire_cooldown <= 0.0 and _mag > 0:
+					_shoot(dist)
+			if _cover_timer <= 0.0 or _reload_timer > 0.0:
+				_cover_cycles += 1
+				if _cover_cycles >= 3 and hit_points > 50.0:
+					_leave_cover()
+					state = State.ATTACK
+				else:
+					_cover_phase = 1
+					_cover_timer = randf_range(0.8, 1.6)
+				return [Vector3.ZERO, 0.0]
+			var d2 := Vector2(_peek_point.x - global_position.x, _peek_point.z - global_position.z).length()
+			return [_steer_to(_peek_point) if d2 > 0.4 else Vector3.ZERO, PATROL_SPEED * 1.3]
+	return [Vector3.ZERO, 0.0]
+
+
+func is_hidden_from(threat: Vector3) -> bool:
+	return game.nav != null and not game.nav.line_clear(global_position, threat)
+
+
+# ------------------------------------------------------------------ loot
+func _find_loot():
+	var cands: Array = []
+	for c in game.loot_crates:
+		if not is_instance_valid(c) or c.is_queued_for_deletion():
+			continue
+		var d: float = Vector2(c.global_position.x - global_position.x, c.global_position.z - global_position.z).length()
+		if d >= LOOT_RANGE:
+			continue
+		var claimed = c.get_meta("claimed_by", 0)
+		if claimed != 0 and claimed != get_instance_id() and is_instance_id_valid(claimed):
+			continue
+		var w: String = c.contents.get("weapon", "")
+		var wants_gun: bool = w != "" and WEAPONS.has(w) and int(WEAPONS[w]["tier"]) > weapon_tier()
+		var wants_med: bool = int(c.contents.get("medkits", 0)) > 0 and hit_points < 80.0
+		if wants_gun or wants_med:
+			cands.append([d, c])
+	cands.sort_custom(func(x, y): return x[0] < y[0])
+	# Only crates that are actually close on foot (not behind a long wall).
+	for i in range(mini(2, cands.size())):
+		var c = cands[i][1]
+		if game.nav != null:
+			var path: PackedVector3Array = game.nav.find_path(global_position, c.global_position)
+			var length := 0.0
+			var prev := global_position
+			for q in path:
+				length += Vector2(q.x - prev.x, q.z - prev.z).length()
+				prev = q
+			if path.is_empty() or length > LOOT_RANGE * 1.4:
+				continue
+		c.set_meta("claimed_by", get_instance_id())
+		return c
+	return null
+
+
+# ------------------------------------------------------------------ movement helpers
 ## Direction toward `goal`, following the navigation grid around rocks, ruins and wrecks.
 func _steer_to(goal: Vector3) -> Vector3:
 	var pos := global_position
@@ -359,22 +667,25 @@ func _steer_to(goal: Vector3) -> Vector3:
 		_path_i += 1
 	if _path.is_empty():
 		return Vector3.ZERO
-	var target := _path[_path_i]
-	var d2 := Vector3(target.x - pos.x, 0.0, target.z - pos.z)
+	var tgt := _path[_path_i]
+	var d2 := Vector3(tgt.x - pos.x, 0.0, tgt.z - pos.z)
 	return d2.normalized() if d2.length() > 0.05 else Vector3.ZERO
 
 
-## Keep a little distance from other soldiers so squads do not jam in gaps.
+## Keep distance from other soldiers so squads do not jam in gaps or in the final circle.
 func _separation() -> Vector3:
 	var push := Vector3.ZERO
+	var r := SEPARATION
 	for e in game.enemies:
 		if e == self or not is_instance_valid(e):
 			continue
 		var d: Vector3 = global_position - e.global_position
 		d.y = 0.0
 		var l := d.length()
-		if l < 1.6 and l > 0.01:
-			push += d / l * (1.6 - l)
+		if l < r and l > 0.01:
+			push += d / l * (r - l)
+		elif l <= 0.01:
+			push += Vector3(randf_range(-1, 1), 0, randf_range(-1, 1))
 	return push
 
 
@@ -398,19 +709,32 @@ func _check_stuck(delta: float, speed: float) -> void:
 		var side := Vector3(-fwd.z, 0, fwd.x) * (1.0 if randf() < 0.5 else -1.0)
 		_unstick_dir = (side - fwd * 0.6).normalized()
 		_unstick_timer = 0.6
-		if game.nav != null:
-			# Remember what we bumped into so the next plan goes around it.
+		# Remember what we bumped into so the next plan goes around it — unless it's just
+		# another soldier (they move; blocking their cell would wall off the final circle).
+		if game.nav != null and not _soldier_ahead(fwd):
 			game.nav.block_temporarily(global_position + fwd * 0.9, game.mission_time)
 		_path = PackedVector3Array()
 		_repath_timer = 0.0
 		if _stuck_streak >= 3:
 			_stuck_streak = 0
 			if state == State.PATROL and game.zone != null:
+				_post_key = Vector4.ZERO
 				_set_origin(game.zone.random_point_in_target())
+			elif state == State.COVER:
+				_leave_cover()
+				state = State.ATTACK
 	else:
 		_stuck_streak = 0
 	_stuck_clock = 0.0
 	_stuck_from = global_position
+
+
+func _soldier_ahead(fwd: Vector3) -> bool:
+	var probe := global_position + fwd * 1.0
+	for e in game.enemies:
+		if e != self and is_instance_valid(e) and Vector2(e.global_position.x - probe.x, e.global_position.z - probe.z).length() < 1.0:
+			return true
+	return false
 
 
 func _face(dir: Vector3, delta: float) -> void:
@@ -420,25 +744,42 @@ func _face(dir: Vector3, delta: float) -> void:
 	rotation.y = lerp_angle(rotation.y, yaw, clampf(delta * 8.0, 0.0, 1.0))
 
 
-func _has_line_of_sight(player: CharacterBody3D) -> bool:
+func _has_line_of_sight(t: Node3D) -> bool:
 	var from := global_position + Vector3(0, EYE_HEIGHT, 0)
-	var to := player.global_position + Vector3(0, 1.4, 0)
+	var to := t.global_position + Vector3(0, 1.4, 0)
 	var query := PhysicsRayQueryParameters3D.create(from, to)
 	query.exclude = [get_rid()]
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
-	return not result.is_empty() and result.collider == player
+	return not result.is_empty() and result.collider == t
 
 
 func _shoot(dist: float) -> void:
-	_fire_cooldown = FIRE_INTERVAL + randf() * 0.6
+	if _reload_timer > 0.0 or not _valid(target):
+		return
+	if _mag <= 0:
+		_reload_timer = float(WEAPONS[weapon]["reload"])
+		return
+	var w: Dictionary = WEAPONS[weapon]
+	_mag -= 1
+	_fire_cooldown = float(w["interval"]) * randf_range(1.0, 1.35)
 	_muzzle.light_energy = 4.0
 	_muzzle.visible = true
 	_flash_mesh.rotation.z = randf() * TAU
 	shots_fired += 1
 	if game.audio:
-		game.audio.play_at("shot_enemy", global_position + Vector3(0, 1.3, 0), 0.0, 0.08)
-	var chance := BASE_HIT_CHANCE * clampf(1.25 - dist / ATTACK_RANGE, 0.3, 1.0)
-	if game.is_player_moving_fast():
-		chance *= 0.6
-	if randf() < chance:
-		game.damage_player(DAMAGE, global_position)
+		game.audio.play_at("shot_enemy" if weapon == "lee_enfield" else Audio.SHOT.get(weapon, "shot_enemy"), global_position + Vector3(0, 1.3, 0), -1.0, 0.08)
+	game.on_enemy_shot(self)
+	var rng: float = float(w["range"])
+	var chance: float = float(w["hit"]) * clampf(1.25 - dist / rng, 0.25, 1.0)
+	if target == game.player:
+		if game.is_player_moving_fast():
+			chance *= 0.6
+		if randf() < chance:
+			game.damage_player(float(w["dmg_player"]), global_position, self)
+	else:
+		# Soldiers peeking from cover are harder to hit.
+		if target.state == State.COVER and target._cover_phase != 2:
+			chance *= 0.25
+		if randf() < chance:
+			if target.take_hit_from(float(w["dmg_soldier"]), self):
+				kills += 1

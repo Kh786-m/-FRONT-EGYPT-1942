@@ -1,4 +1,4 @@
-name: Build Android debug APK
+name: Build Android APK (debug + optional signed release)
 
 on:
   push:
@@ -15,6 +15,10 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
+    env:
+      # Optional release signing: set these repository secrets to also build a signed release APK.
+      # Without them the workflow keeps producing only the debug APK.
+      HAS_RELEASE_KEY: ${{ secrets.HARAQ_KEYSTORE_BASE64 != '' && secrets.HARAQ_KEYSTORE_PASSWORD != '' && secrets.HARAQ_KEY_ALIAS != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -93,3 +97,39 @@ jobs:
           name: haraq-debug-apk
           path: build/haraq-debug.apk
           if-no-files-found: error
+
+      - name: Decode release keystore (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.HARAQ_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          ls -la "$RUNNER_TEMP/release.keystore"
+
+      - name: Export signed release APK (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        shell: bash
+        env:
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ runner.temp }}/release.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: ${{ secrets.HARAQ_KEY_ALIAS }}
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: ${{ secrets.HARAQ_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          godot --headless --path . --export-release "Android" build/haraq-release.apk
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs build/haraq-release.apk | head -5
+          rm -f "$RUNNER_TEMP/release.keystore"
+          ls -la build
+
+      - name: Upload release APK (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: haraq-release-apk
+          path: build/haraq-release.apk
+          if-no-files-found: error
+
+      - name: Release signing status
+        if: env.HAS_RELEASE_KEY != 'true'
+        run: echo "No HARAQ_KEYSTORE_* secrets set — built the debug APK only (see RELEASE_SIGNING_AR.md)."

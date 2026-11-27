@@ -85,6 +85,8 @@ func _nav_checks() -> void:
 
 # ------------------------------------------------------------------ AI behaviour
 func _freeze_all_but(keep) -> void:
+	# v0.6: soldiers fight each other; isolate the one under test from the frozen squad.
+	game.free_for_all = false
 	for e in game.enemies:
 		e.set_physics_process(e == keep)
 
@@ -173,6 +175,7 @@ func _ai_checks() -> void:
 	for x in game.enemies:
 		x.set_physics_process(true)
 		x.alert()
+	game.free_for_all = true
 	var starts := {}
 	for x in game.enemies:
 		starts[x] = x.global_position

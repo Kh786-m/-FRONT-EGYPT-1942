@@ -94,6 +94,8 @@ var _cover_phase := 0
 var _cover_timer := 0.0
 var _cover_cycles := 0
 var _cover_cooldown := 0.0
+var _peek_aimed := false
+var _peek_blind := 0.0
 var _gun_holder: Node3D
 
 
@@ -409,6 +411,11 @@ func _physics_process(delta: float) -> void:
 			if _loot_crate != null:
 				if not is_instance_valid(_loot_crate) or _loot_crate.is_queued_for_deletion():
 					_loot_crate = null
+				elif Vector2(_loot_crate.global_position.x - origin.x, _loot_crate.global_position.z - origin.z).length() > LOOT_RANGE + 2.0 \
+						or (zone != null and not zone.is_inside(_loot_crate.global_position)):
+					# Our post moved (zone shrank / new orders): forget that crate.
+					_loot_crate.remove_meta("claimed_by")
+					_loot_crate = null
 				else:
 					goal = _loot_crate.global_position
 					to_goal = goal - global_position
@@ -588,14 +595,30 @@ func _cover_step(delta: float, has_target: bool, tpos: Vector3, dist: float) -> 
 			var d1 := Vector2(_cover_point.x - global_position.x, _cover_point.z - global_position.z).length()
 			return [_steer_to(_cover_point) if d1 > 0.5 else Vector3.ZERO, PATROL_SPEED]
 		2:
+			var d2 := Vector2(_peek_point.x - global_position.x, _peek_point.z - global_position.z).length()
+			var at_peek := d2 <= 0.5
 			if has_target:
 				var to_t := tpos - global_position
 				to_t.y = 0.0
 				_face(to_t, delta)
-				if _can_see and _fire_cooldown <= 0.0 and _mag > 0:
-					_shoot(dist)
+				if _can_see and _mag > 0:
+					if not _peek_aimed:
+						# Out of cover with a clear view: a short aim, then fire.
+						_peek_aimed = true
+						_fire_cooldown = minf(_fire_cooldown, randf_range(0.25, 0.45))
+						_cover_timer = maxf(_cover_timer, 1.2)
+					if _fire_cooldown <= 0.0:
+						_shoot(dist)
+			if at_peek and not _can_see:
+				_peek_blind += delta
+				if _peek_blind > 0.7:
+					# No line of fire from this side: try the other side of the cover.
+					_peek_blind = 0.0
+					_peek_point = _cover_point * 2.0 - _peek_point
 			if _cover_timer <= 0.0 or _reload_timer > 0.0:
 				_cover_cycles += 1
+				_peek_aimed = false
+				_peek_blind = 0.0
 				if _cover_cycles >= 3 and hit_points > 50.0:
 					_leave_cover()
 					state = State.ATTACK
@@ -603,8 +626,7 @@ func _cover_step(delta: float, has_target: bool, tpos: Vector3, dist: float) -> 
 					_cover_phase = 1
 					_cover_timer = randf_range(0.8, 1.6)
 				return [Vector3.ZERO, 0.0]
-			var d2 := Vector2(_peek_point.x - global_position.x, _peek_point.z - global_position.z).length()
-			return [_steer_to(_peek_point) if d2 > 0.4 else Vector3.ZERO, PATROL_SPEED * 1.3]
+			return [_steer_to(_peek_point) if not at_peek else Vector3.ZERO, PATROL_SPEED * 1.3]
 	return [Vector3.ZERO, 0.0]
 
 

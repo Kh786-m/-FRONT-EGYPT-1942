@@ -148,6 +148,8 @@ var _style_on: StyleBoxFlat
 var _style_off: StyleBoxFlat
 var volume_slider: HSlider
 var mute_button: Button
+var music_slider: HSlider
+var sfx_slider: HSlider
 var audio: Node
 
 
@@ -1437,6 +1439,7 @@ func _shoot() -> void:
 	player_flash.scale = Vector3.ONE * randf_range(0.8, 1.25)
 	cooldown = float(w["interval"])
 	recoil = -float(w["recoil"])
+	audio.duck(0.45)
 	# Gunfire is loud: nearby patrols come looking.
 	for e in enemies:
 		if is_instance_valid(e) and e.global_position.distance_to(player.global_position) < SHOT_ALERT_RADIUS:
@@ -1474,6 +1477,7 @@ func _restart() -> void:
 func _end_mission(victory: bool) -> void:
 	placement = 1 if victory else enemies.size() + 1
 	audio.stop_ambience()
+	audio.play_music("music_menu")
 	state = GameState.WON if victory else GameState.DEAD
 	fire_held = false
 	sprint_held = false
@@ -1684,23 +1688,7 @@ func _create_hero_intro() -> void:
 	al.add_theme_font_size_override("font_size", 20)
 	al.add_theme_color_override("font_color", BRASS)
 	arow.add_child(al)
-	volume_slider = HSlider.new()
-	volume_slider.min_value = 0
-	volume_slider.max_value = 100
-	volume_slider.step = 5
-	volume_slider.value = audio.volume * 100.0
-	volume_slider.custom_minimum_size = Vector2(300, 44)
-	volume_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	volume_slider.focus_mode = Control.FOCUS_NONE
-	var track := _style(Color(SAND, 0.25), BRASS)
-	track.content_margin_top = 6
-	track.content_margin_bottom = 6
-	volume_slider.add_theme_stylebox_override("slider", track)
-	var fill := _style(Color(EMBER, 0.85), BRASS)
-	fill.content_margin_top = 6
-	fill.content_margin_bottom = 6
-	volume_slider.add_theme_stylebox_override("grabber_area", fill)
-	volume_slider.add_theme_stylebox_override("grabber_area_highlight", fill)
+	volume_slider = _make_slider(audio.volume, 260)
 	volume_slider.value_changed.connect(func(v: float) -> void:
 		audio.set_volume(v / 100.0)
 		_refresh_mute_button())
@@ -1716,6 +1704,27 @@ func _create_hero_intro() -> void:
 		_refresh_mute_button())
 	arow.add_child(mute_button)
 	_refresh_mute_button()
+	var mrow := HBoxContainer.new()
+	mrow.add_theme_constant_override("separation", 12)
+	content.add_child(mrow)
+	var ml := Label.new()
+	ml.text = "موسيقى  MUSIC"
+	ml.add_theme_font_size_override("font_size", 18)
+	ml.add_theme_color_override("font_color", BRASS)
+	mrow.add_child(ml)
+	music_slider = _make_slider(audio.music_volume, 170)
+	music_slider.value_changed.connect(func(v: float) -> void: audio.set_music_volume(v / 100.0))
+	mrow.add_child(music_slider)
+	var sl := Label.new()
+	sl.text = "مؤثرات  SFX"
+	sl.add_theme_font_size_override("font_size", 18)
+	sl.add_theme_color_override("font_color", BRASS)
+	mrow.add_child(sl)
+	sfx_slider = _make_slider(audio.sfx_volume, 170)
+	sfx_slider.value_changed.connect(func(v: float) -> void: audio.set_sfx_volume(v / 100.0))
+	sfx_slider.drag_ended.connect(func(_c: bool) -> void: audio.play("shot_webley", -6.0))
+	mrow.add_child(sfx_slider)
+	audio.play_music("music_menu")
 	var start := Button.new()
 	start.text = "ابدأ المهمة  |  START MISSION"
 	start.custom_minimum_size = Vector2(420, 70)
@@ -1724,6 +1733,27 @@ func _create_hero_intro() -> void:
 	start.add_theme_stylebox_override("normal", _style(Color(EMBER, 0.85), BRASS))
 	content.add_child(start)
 	start.pressed.connect(_start_hero_mission)
+
+
+func _make_slider(value: float, width: float) -> HSlider:
+	var sl := HSlider.new()
+	sl.min_value = 0
+	sl.max_value = 100
+	sl.step = 5
+	sl.value = value * 100.0
+	sl.custom_minimum_size = Vector2(width, 40)
+	sl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sl.focus_mode = Control.FOCUS_NONE
+	var track := _style(Color(SAND, 0.25), BRASS)
+	track.content_margin_top = 6
+	track.content_margin_bottom = 6
+	sl.add_theme_stylebox_override("slider", track)
+	var fill := _style(Color(EMBER, 0.85), BRASS)
+	fill.content_margin_top = 6
+	fill.content_margin_bottom = 6
+	sl.add_theme_stylebox_override("grabber_area", fill)
+	sl.add_theme_stylebox_override("grabber_area_highlight", fill)
+	return sl
 
 
 func _refresh_mute_button() -> void:
@@ -1738,6 +1768,7 @@ func _start_hero_mission() -> void:
 	state = GameState.PLAYING
 	audio.play("ui_click")
 	audio.start_ambience()
+	audio.play_music("music_battle")
 	intro_overlay.visible = false
 	if not is_mobile:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

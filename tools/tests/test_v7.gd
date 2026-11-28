@@ -46,6 +46,8 @@ func _ready():
 	await _death_checks()
 	if has_method("_audio_checks"):
 		await call("_audio_checks")
+	if has_method("_export_checks"):
+		call("_export_checks")
 	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://settings.cfg"))
 	print("RESULT passes=%d fails=%d" % [passes, fails])
 	get_tree().quit(1 if fails > 0 else 0)
@@ -268,3 +270,32 @@ func _audio_checks() -> void:
 	check(a.wind != null and a.wind.stream != null and a.wind.stream.loop, "wind recording loops")
 	check(a.sea != null and a.sea.stream != null and a.sea.stream.loop, "surf recording loops")
 	check(a.music_streams.has("music_menu") and a.music_streams.has("music_battle"), "procedural music kept")
+
+# ------------------------------------------------------------------ AAB export
+func _export_checks() -> void:
+	var cfg := ConfigFile.new()
+	check(cfg.load("res://export_presets.cfg") == OK, "export_presets.cfg loads")
+	var apk := -1
+	var aab := -1
+	for i in range(4):
+		var sec := "preset.%d" % i
+		if not cfg.has_section(sec):
+			continue
+		if cfg.get_value(sec, "name") == "Android":
+			apk = i
+		elif cfg.get_value(sec, "name") == "Android AAB":
+			aab = i
+	check(apk >= 0 and aab >= 0, "two presets: Android (APK) and Android AAB")
+	if apk < 0 or aab < 0:
+		return
+	var ao := "preset.%d.options" % aab
+	var po := "preset.%d.options" % apk
+	check(bool(cfg.get_value(ao, "gradle_build/use_gradle_build")) and int(cfg.get_value(ao, "gradle_build/export_format")) == 1, "AAB preset uses the Gradle build and exports an App Bundle")
+	check(not bool(cfg.get_value(po, "gradle_build/use_gradle_build")), "APK preset unchanged (no Gradle needed)")
+	check(cfg.get_value(ao, "version/code") == cfg.get_value(po, "version/code") and cfg.get_value(ao, "version/name") == cfg.get_value(po, "version/name"), "both presets share version name/code (%s / %s)" % [cfg.get_value(po, "version/name"), cfg.get_value(po, "version/code")])
+	check(str(cfg.get_value("preset.%d" % aab, "exclude_filter")).contains("android/*"), "Gradle template folder excluded from the game data")
+	var wf := FileAccess.get_file_as_string("res://.github/workflows/android-apk.yml")
+	check(wf.contains("\n  aab:") and wf.contains("android_source.zip") and wf.contains("--export-debug \"Android AAB\"") and wf.contains("--export-release \"Android AAB\""), "CI has a separate aab job (debug AAB, signed release AAB with secrets)")
+	check(wf.contains("haraq-debug-apk") and wf.contains("\n  android:"), "APK job still there")
+	var doc := FileAccess.get_file_as_string("res://RELEASE_SIGNING_AR.md")
+	check(doc.contains("Play Console") and doc.contains("haraq-release-aab"), "Arabic guide covers the AAB + Play Console steps")

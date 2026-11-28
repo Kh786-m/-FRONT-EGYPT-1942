@@ -3,6 +3,7 @@ name: Build Android APK (debug + optional signed release)
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 env:
@@ -78,6 +79,33 @@ jobs:
         run: |
           set -euo pipefail
           godot --headless --path . --import
+
+      - name: Smoke test (campaign missions + v0.6 battle royale)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Campaign menu: load only
+          out=$(godot --headless --path . scenes/main_menu.tscn --fixed-fps 30 --quit-after 120 2>&1 || true)
+          echo "$out" | grep -E "SCRIPT ERROR|ERROR: Failed" || true
+          if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in main_menu"; exit 1; fi
+          # Campaign missions: QA bot playthrough
+          for scene in scenes/missions/m01_alamein_outpost.tscn scenes/maps/m02_alexandria_harbor.tscn; do
+            out=$(godot --headless --path . "$scene" --fixed-fps 30 --quit-after 5400 -- --qa-bot --report 2>&1 || true)
+            echo "$out" | grep -E "REPORT|SCRIPT ERROR" || true
+            if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in $scene"; exit 1; fi
+            grep -q "over=true" <<<"$out" || { echo "Mission did not finish: $scene"; exit 1; }
+          done
+          # v0.6 harness (scripts expect to sit at the project root — see tools/tests/README.txt)
+          cp tools/tests/test_v6.gd tools/tests/test_v6.tscn .
+          set +e
+          out=$(godot --headless --path . res://test_v6.tscn --fixed-fps 30 2>&1)
+          rc=$?
+          set -e
+          rm -f test_v6.gd test_v6.tscn
+          echo "$out" | grep -E "PASS |FAIL |RESULT|SCRIPT ERROR" || true
+          if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in test_v6"; exit 1; fi
+          grep -q "fails=0" <<<"$out" || { echo "test_v6 failed"; exit 1; }
+          test "$rc" -eq 0
 
       - name: Export debug APK
         shell: bash

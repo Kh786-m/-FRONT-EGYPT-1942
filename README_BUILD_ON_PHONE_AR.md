@@ -26,4 +26,4 @@
 افتح التشغيلة الحمرا، واضغط على الخطوة اللي فشلت، وانسخ آخر سطور السجل وابعتها للمراجعة.
 
 ## نسخة للنشر (Release)
-للنشر على Google Play محتاج keystore دائم محفوظ في GitHub Secrets وخطوة `--export-release`، ودي لسه ما اتعملتش.
+الـworkflow بقى يدعم نسخة Release موقّعة اختياريًا. الخطوات في [RELEASE_SIGNING_AR.md](RELEASE_SIGNING_AR.md).

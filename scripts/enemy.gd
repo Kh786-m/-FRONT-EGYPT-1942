@@ -281,7 +281,7 @@ func _valid(t) -> bool:
 	if t == null or not is_instance_valid(t):
 		return false
 	if game != null and t == game.player:
-		return game.is_playing()
+		return game.player_active()
 	return t.hit_points > 0.0
 
 
@@ -289,8 +289,9 @@ func _valid(t) -> bool:
 func _update_target() -> void:
 	var me := global_position
 	var cands: Array = []
-	if game.is_playing():
+	if game.player_active():
 		cands.append(game.player)
+	cands.append_array(game.net_targets())
 	if game.free_for_all:
 		for e in game.enemies:
 			if e != self and is_instance_valid(e):
@@ -763,6 +764,13 @@ func _shoot(dist: float) -> void:
 			chance *= 0.6
 		if randf() < chance:
 			game.damage_player(float(w["dmg_player"]), global_position, self)
+	elif "is_human" in target:
+		# A LAN player's body on the host: same damage as the host player takes.
+		if Vector2(target.velocity.x, target.velocity.z).length() > 8.0:
+			chance *= 0.6
+		if randf() < chance:
+			if target.take_hit_from(float(w["dmg_player"]), self):
+				kills += 1
 	else:
 		# Soldiers peeking from cover are harder to hit.
 		if target.state == State.COVER and target._cover_phase != 2:

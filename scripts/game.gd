@@ -15,6 +15,7 @@ const Fx := preload("res://scripts/fx.gd")
 const NavScript := preload("res://scripts/nav.gd")
 const CoverScript := preload("res://scripts/cover.gd")
 const AudioScript := preload("res://scripts/audio.gd")
+const NetScript := preload("res://scripts/net.gd")
 const ARABIC_FONT := preload("res://assets/fonts/NotoKufiArabic-SemiBold.ttf")
 
 # HARAQ palette
@@ -151,6 +152,16 @@ var mute_button: Button
 var music_slider: HSlider
 var sfx_slider: HSlider
 var audio: Node
+## LAN multiplayer (scripts/net.gd); inactive in single player.
+var net: Node
+var _jumped := false
+var lan_panel: Control
+var lan_name: LineEdit
+var lan_ip: LineEdit
+var lan_status: Label
+var lan_players: Label
+var lan_hosts: VBoxContainer
+var lan_start: Button
 
 
 func _ready() -> void:
@@ -159,6 +170,10 @@ func _ready() -> void:
 	audio = AudioScript.new()
 	audio.name = "Audio"
 	add_child(audio)
+	net = NetScript.new()
+	net.name = "Net"
+	net.game = self
+	add_child(net)
 	quality = G.load_quality()
 	_create_world()
 	_create_egyptian_life()
@@ -183,8 +198,23 @@ func _build_nav() -> void:
 	cover.build(obstacles, nav, func(x: float, z: float) -> float: return Terrain.height(x, z))
 
 
+## The match is running (bots act). In LAN games the host keeps simulating after its own death.
 func is_playing() -> bool:
+	return state == GameState.PLAYING or (net != null and net.is_server() and net.in_match and not net.match_over)
+
+
+## The local player is alive and in control.
+func player_active() -> bool:
 	return state == GameState.PLAYING
+
+
+func player_callsign() -> String:
+	return net.my_name if net != null and net.is_active() else PLAYER_CALLSIGN
+
+
+## Extra targets for the bots (remote LAN players' bodies on the host).
+func net_targets() -> Array:
+	return net.bot_targets() if net != null and net.is_server() and net.in_match else []
 
 
 func is_player_moving_fast() -> bool:
@@ -595,6 +625,10 @@ func swap_weapon() -> void:
 func use_medkit() -> void:
 	if medkits <= 0 or health >= MAX_HEALTH or state != GameState.PLAYING:
 		return
+	if net != null and net.is_client() and net.in_match:
+		net.request_heal() # health and medkits are kept by the host
+		_toast("+%d HP  إسعاف" % int(MEDKIT_HEAL))
+		return
 	medkits -= 1
 	health = minf(MAX_HEALTH, health + MEDKIT_HEAL)
 	_toast("+%d HP  إسعاف" % int(MEDKIT_HEAL))
@@ -646,6 +680,9 @@ func give_weapon(id: String, allow_replace := true) -> bool:
 ## Take everything that can be auto-collected from a crate. A weapon is only auto-taken
 ## if there is a free slot (or it is a duplicate); otherwise E / INTERACT swaps it in.
 func _collect_from(crate: Node3D, interact: bool) -> void:
+	if net != null and net.is_client() and not crate.has_meta("granted"):
+		net.request_loot(crate, interact) # the host owns the crate; it grants, then we take
+		return
 	var c: Dictionary = crate.contents
 	var got: PackedStringArray = []
 	var ammo: Dictionary = c.get("ammo", {})
@@ -690,7 +727,11 @@ func interact() -> void:
 
 
 func _spawn_crate(pos: Vector3, contents: Dictionary, small := false) -> Node3D:
+	if net != null and net.is_client() and net.in_match and not net.spawning_from_server:
+		net.request_drop(pos, contents)
+		return null
 	var crate: Node3D = LootScript.new()
+	crate.set_meta("small", small)
 	add_child(crate)
 	crate.position = Vector3(pos.x, Terrain.height(pos.x, pos.z) - 0.04, pos.z)
 	crate.rotation.y = loot_rng.randf() * TAU
@@ -780,7 +821,7 @@ func _on_enemy_died(enemy: CharacterBody3D, by_player: bool) -> void:
 		score += 1
 		experience_points += 25
 		reward_coins += 10
-		add_kill_feed(PLAYER_CALLSIGN, enemy.callsign, Weapons.get_weapon(current_weapon()).get("name", ""))
+		add_kill_feed(player_callsign(), enemy.callsign, Weapons.get_weapon(current_weapon()).get("name", ""))
 	elif cause == "zone" or cause == "":
 		zone_kills += 1
 		add_kill_feed(ZONE_CALLSIGN, enemy.callsign, "")
@@ -792,7 +833,7 @@ func _on_enemy_died(enemy: CharacterBody3D, by_player: bool) -> void:
 		add_kill_feed(kname, enemy.callsign, kw)
 	# Fallen soldiers leave a small supply drop.
 	_spawn_crate(enemy.global_position, LootScript.roll_enemy_drop(loot_rng), true)
-	if enemies.is_empty() and state == GameState.PLAYING:
+	if enemies.is_empty() and state == GameState.PLAYING and not (net != null and net.in_match):
 		_end_mission(true)
 
 
@@ -824,9 +865,9 @@ func _apply_player_damage(dmg: float, flash: float) -> void:
 	damage_flash.color.a = maxf(damage_flash.color.a, flash)
 	if health <= 0.0:
 		if flash < 0.3 or last_player_attacker == null or not is_instance_valid(last_player_attacker):
-			add_kill_feed(ZONE_CALLSIGN, PLAYER_CALLSIGN, "")
+			add_kill_feed(ZONE_CALLSIGN, player_callsign(), "")
 		else:
-			add_kill_feed(last_player_attacker.callsign, PLAYER_CALLSIGN, Weapons.get_weapon(last_player_attacker.weapon)["name"])
+			add_kill_feed(last_player_attacker.callsign, player_callsign(), Weapons.get_weapon(last_player_attacker.weapon)["name"])
 		_end_mission(false)
 
 
@@ -836,6 +877,8 @@ func add_kill_feed(killer: String, victim: String, weapon_name: String) -> void:
 	if weapon_name != "":
 		line += "  (%s)" % weapon_name
 	kill_feed_entries.append({"text": line, "t": mission_time})
+	if net != null and net.is_server():
+		net.send_feed(killer, victim, weapon_name)
 	while kill_feed_entries.size() > 5:
 		kill_feed_entries.pop_front()
 	_refresh_kill_feed()
@@ -891,6 +934,8 @@ func on_enemy_shot(shooter: Node3D) -> void:
 			continue
 		if e.target == null and e.global_position.distance_to(shooter.global_position) < SHOT_ALERT_RADIUS:
 			e.alert(shooter)
+	if net != null and net.is_server() and shooter.has_meta("nid"):
+		net.bot_shot(shooter)
 	if audio != null and audio.has_method("duck"):
 		var d := shooter.global_position.distance_to(player.global_position)
 		if d < 40.0:
@@ -898,6 +943,8 @@ func on_enemy_shot(shooter: Node3D) -> void:
 
 
 func alive_count() -> int:
+	if net != null and net.in_match:
+		return net.alive_total() if net.is_server() else net.remote_alive
 	return enemies.size() + (1 if state != GameState.DEAD else 0)
 
 
@@ -1275,11 +1322,20 @@ func _look(delta: Vector2, sensitivity: float = 1.0) -> void:
 func _jump() -> void:
 	if state == GameState.PLAYING and player.is_on_floor():
 		player.velocity.y = JUMP_SPEED
+		_jumped = true
 
 
 func _physics_process(delta: float) -> void:
 	damage_flash.color.a = move_toward(damage_flash.color.a, 0.0, delta * 1.2)
+	if net != null and net.is_active():
+		net.physics_tick(delta)
 	if state != GameState.PLAYING:
+		# LAN host: the match goes on for the others after the host is down.
+		if is_playing():
+			mission_time += delta
+			_update_zone(delta)
+			if nav:
+				nav.tick(mission_time)
 		return
 	mission_time += delta
 	var axis := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
@@ -1301,6 +1357,9 @@ func _physics_process(delta: float) -> void:
 		player.velocity.y -= GRAVITY * delta
 	if Input.is_action_just_pressed("jump"):
 		_jump()
+	if net != null and net.is_client():
+		net.record_input(Vector3(player.velocity.x, 0.0, player.velocity.z), _jumped)
+	_jumped = false
 	var before_step := player.global_position
 	player.move_and_slide()
 	if player.is_on_floor():
@@ -1348,6 +1407,8 @@ func _physics_process(delta: float) -> void:
 
 
 func _update_zone(delta: float) -> void:
+	if net != null and net.is_client():
+		return # the host's zone arrives with every snapshot (and the host applies damage)
 	zone.tick(delta)
 	var dps: float = zone.damage_per_second()
 	for e in enemies.duplicate():
@@ -1441,19 +1502,23 @@ func _shoot() -> void:
 	cooldown = float(w["interval"])
 	recoil = -float(w["recoil"])
 	audio.duck(0.45)
+	if net != null and net.is_client() and net.in_match:
+		# The host re-traces the shot and applies the damage; impact effects come back from it.
+		net.request_shot(camera.global_position, _shot_dir(w), id)
+		return
 	# Gunfire is loud: nearby patrols come looking.
 	for e in enemies:
 		if is_instance_valid(e) and e.global_position.distance_to(player.global_position) < SHOT_ALERT_RADIUS:
 			e.alert()
 	var origin := camera.global_position
-	var spread: float = float(w["spread"]) * (0.25 if aiming else 1.0) * (1.6 if is_player_moving_fast() else 1.0)
-	var cam_basis := camera.global_transform.basis
-	var dir := (-cam_basis.z + cam_basis.x * randf_range(-spread, spread) + cam_basis.y * randf_range(-spread, spread)).normalized()
+	var dir := _shot_dir(w)
 	var end := origin + dir * 180.0
 	var query := PhysicsRayQueryParameters3D.create(origin, end)
 	query.exclude = [player.get_rid()]
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
 	if result.is_empty():
+		if net != null and net.is_server():
+			net.broadcast_shot("p1", origin, end, Vector3.UP, "", id)
 		return
 	var hit: Object = result.collider
 	var detail: float = G.preset(quality)["detail"]
@@ -1463,6 +1528,8 @@ func _shoot() -> void:
 	elif hit is Node and (hit as Node).has_meta("metal"):
 		kind = "metal"
 	Fx.impact(self, result.position + result.normal * 0.05, result.normal, kind, detail)
+	if net != null and net.is_server():
+		net.broadcast_shot("p1", origin, result.position, result.normal, kind, id)
 	audio.play_at({"soldier": "hit_flesh", "metal": "hit_metal"}.get(kind, "hit_sand"), result.position, -2.0 if kind == "soldier" else -6.0, 0.1)
 	if hit != null and hit.has_method("take_hit"):
 		hit_marker_timer = 0.14
@@ -1471,12 +1538,20 @@ func _shoot() -> void:
 		hit.take_hit(float(w["damage"]) * (float(w["head_mult"]) if headshot else 1.0))
 
 
+func _shot_dir(w: Dictionary) -> Vector3:
+	var spread: float = float(w["spread"]) * (0.25 if aiming else 1.0) * (1.6 if is_player_moving_fast() else 1.0)
+	var cam_basis := camera.global_transform.basis
+	return (-cam_basis.z + cam_basis.x * randf_range(-spread, spread) + cam_basis.y * randf_range(-spread, spread)).normalized()
+
+
 func _restart() -> void:
+	if net != null:
+		net.leave()
 	get_tree().reload_current_scene()
 
 
 func _end_mission(victory: bool) -> void:
-	placement = 1 if victory else enemies.size() + 1
+	placement = 1 if victory else (alive_count() + 1 if net != null and net.in_match else enemies.size() + 1)
 	audio.stop_ambience()
 	audio.play_music("music_menu")
 	state = GameState.WON if victory else GameState.DEAD
@@ -1732,8 +1807,154 @@ func _create_hero_intro() -> void:
 	start.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	start.add_theme_font_size_override("font_size", 28)
 	start.add_theme_stylebox_override("normal", _style(Color(EMBER, 0.85), BRASS))
-	content.add_child(start)
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 14)
+	content.add_child(srow)
+	start.reparent(srow)
 	start.pressed.connect(_start_hero_mission)
+	var lan := Button.new()
+	lan.name = "LanButton"
+	lan.text = "لعب جماعي (واي فاي)  |  LAN"
+	lan.custom_minimum_size = Vector2(330, 70)
+	lan.add_theme_font_size_override("font_size", 24)
+	lan.add_theme_stylebox_override("normal", _style(Color(SEA, 0.9), BRASS))
+	srow.add_child(lan)
+	lan.pressed.connect(open_lan_panel)
+	_create_lan_panel(layer)
+
+
+# ------------------------------------------------------------------ LAN lobby (v0.7)
+func _lan_row(parent: Control) -> HBoxContainer:
+	var r := HBoxContainer.new()
+	r.add_theme_constant_override("separation", 12)
+	r.alignment = BoxContainer.ALIGNMENT_CENTER
+	parent.add_child(r)
+	return r
+
+
+func _lan_button(parent: Control, text: String, w: float, color: Color) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(w, 58)
+	b.add_theme_font_size_override("font_size", 22)
+	b.add_theme_stylebox_override("normal", _style(color, BRASS))
+	b.focus_mode = Control.FOCUS_NONE
+	parent.add_child(b)
+	return b
+
+
+func _create_lan_panel(layer: CanvasLayer) -> void:
+	lan_panel = ColorRect.new()
+	lan_panel.name = "LanPanel"
+	(lan_panel as ColorRect).color = Color(INK, 0.985)
+	lan_panel.theme = _make_theme()
+	lan_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lan_panel.visible = false
+	layer.add_child(lan_panel)
+	var v := VBoxContainer.new()
+	v.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_theme_constant_override("separation", 12)
+	lan_panel.add_child(v)
+	_label(v, "لعب جماعي على نفس الواي فاي  |  LAN", 40, BRASS, true)
+	_label(v, "من 2 لـ 8 لاعبين + جنود، الكل ضد الكل — المستضيف هو اللي بيدير المعركة", 20, SAND, true)
+	var r1 := _lan_row(v)
+	var nl := Label.new()
+	nl.text = "اسمك  NAME"
+	nl.add_theme_font_size_override("font_size", 21)
+	nl.add_theme_color_override("font_color", BRASS)
+	r1.add_child(nl)
+	lan_name = LineEdit.new()
+	lan_name.text = PLAYER_CALLSIGN
+	lan_name.max_length = 16
+	lan_name.custom_minimum_size = Vector2(300, 54)
+	lan_name.add_theme_font_size_override("font_size", 22)
+	r1.add_child(lan_name)
+	var host_b := _lan_button(r1, "استضافة لعبة  |  HOST", 330, Color(EMBER, 0.85))
+	host_b.name = "HostButton"
+	host_b.pressed.connect(func() -> void:
+		audio.play("ui_click")
+		net.host(lan_name.text.strip_edges()))
+	var r2 := _lan_row(v)
+	lan_ip = LineEdit.new()
+	lan_ip.placeholder_text = "IP المستضيف  مثلاً 192.168.1.5"
+	lan_ip.custom_minimum_size = Vector2(380, 54)
+	lan_ip.add_theme_font_size_override("font_size", 22)
+	r2.add_child(lan_ip)
+	var join_b := _lan_button(r2, "انضمام  |  JOIN", 280, Color(SEA, 0.9))
+	join_b.name = "JoinButton"
+	join_b.pressed.connect(func() -> void:
+		audio.play("ui_click")
+		net.join(lan_ip.text, lan_name.text.strip_edges()))
+	_label(v, "ألعاب لقيتها على الشبكة  |  GAMES FOUND", 21, BRASS, true)
+	lan_hosts = VBoxContainer.new()
+	lan_hosts.alignment = BoxContainer.ALIGNMENT_CENTER
+	lan_hosts.add_theme_constant_override("separation", 6)
+	v.add_child(lan_hosts)
+	lan_players = _label(v, "", 21, BONE, true)
+	lan_status = _label(v, "دوّر على لعبة، أو استضيف واحدة وقول لصحابك يدخلوا", 19, Color(BONE, 0.75), true)
+	var r3 := _lan_row(v)
+	lan_start = _lan_button(r3, "ابدأ المعركة  |  START", 360, Color(EMBER, 0.9))
+	lan_start.name = "LanStart"
+	lan_start.pressed.connect(func() -> void:
+		audio.play("ui_click")
+		net.start_match())
+	var back := _lan_button(r3, "رجوع  |  BACK", 220, Color(INK, 0.6))
+	back.pressed.connect(func() -> void:
+		audio.play("ui_click")
+		net.leave()
+		net.stop_discovery()
+		lan_panel.visible = false)
+	net.lobby_changed.connect(_refresh_lan)
+	net.hosts_changed.connect(_refresh_lan_hosts)
+	net.status_changed.connect(func(t: String) -> void: lan_status.text = t)
+	_refresh_lan()
+
+
+func open_lan_panel() -> void:
+	audio.play("ui_click")
+	lan_panel.visible = true
+	net.start_discovery()
+	_refresh_lan()
+	_refresh_lan_hosts()
+
+
+func _refresh_lan() -> void:
+	if lan_panel == null:
+		return
+	var names: PackedStringArray = []
+	var ids: Array = net.players.keys()
+	ids.sort()
+	for id in ids:
+		names.append(("★ " if id == 1 else "") + str(net.players[id]))
+	lan_players.text = ("اللاعبين (%d/%d):  " % [ids.size(), net.MAX_PLAYERS] + "  ·  ".join(names)) if not ids.is_empty() else ""
+	lan_start.visible = net.is_server()
+	lan_start.disabled = ids.size() < 2
+	if net.is_server():
+		lan_start.text = "ابدأ المعركة  |  START  (%d لاعبين + %d جندي)" % [ids.size(), net.bot_count()] if ids.size() >= 2 else "مستني لاعب تاني على الأقل..."
+
+
+func _refresh_lan_hosts() -> void:
+	if lan_hosts == null:
+		return
+	for c in lan_hosts.get_children():
+		c.queue_free()
+	if net.hosts.is_empty():
+		_label(lan_hosts, "لسه مفيش — اتأكد إنكم على نفس الواي فاي، أو اكتب الـIP", 18, Color(BONE, 0.55), true)
+		return
+	for ip in net.hosts:
+		var h: Dictionary = net.hosts[ip]
+		var b := Button.new()
+		b.text = "%s  —  %s  (%d/%d)%s" % [h["name"], ip, h["players"], h["max"], "  بيلعبوا" if h["state"] == "playing" else ""]
+		b.custom_minimum_size = Vector2(560, 52)
+		b.add_theme_font_size_override("font_size", 20)
+		b.disabled = h["state"] == "playing"
+		b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		b.pressed.connect(func() -> void:
+			audio.play("ui_click")
+			lan_ip.text = ip
+			net.join(ip, lan_name.text.strip_edges()))
+		lan_hosts.add_child(b)
 
 
 func _make_slider(value: float, width: float) -> HSlider:
@@ -1771,5 +1992,9 @@ func _start_hero_mission() -> void:
 	audio.start_ambience()
 	audio.play_music("music_battle")
 	intro_overlay.visible = false
+	if lan_panel != null:
+		lan_panel.visible = false
+	if net != null:
+		net.stop_discovery()
 	if not is_mobile:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

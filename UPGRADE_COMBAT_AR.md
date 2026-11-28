@@ -16,6 +16,14 @@
 ## الاستخدام
 افتح مجلد المشروع الذي يحتوي `project.godot` في Godot 4.3 ثم شغّل المشهد. يمكن استخدام ملف `.github/workflows/android-apk.yml` لبناء APK على GitHub Actions بعد رفع **محتويات المشروع** إلى جذر مستودع جديد.
 
+## Changelog v0.7.0
+- جنود بهيكل عظمي (`scripts/soldier_rig.gd`): 18 عضمة، Mesh متسلّخ واحد لكل مظهر، AnimationTree (مشي/جري/تصويب/ضرب/تلقيم/إصابة/موت)، IK للأيدي، LOD للأنيميشن. الجنود ما بقوش يحتاجوا `_legs`؛ الحاجات اللي بتعتمد على `_gun_holder` والفلاش لسه شغالة (الفلاش متعلّق بعظمة السلاح).
+- صوت مسجّل CC0 للأسلحة والانفجار والخطوات والرياح والموج (`tools/import_recordings.py`، المصادر في CREDITS.md). `gen_audio.py` مابقاش بيمسحهم إلا بـ`--synthetic`.
+- AAB: preset «Android AAB» (Gradle) وJob منفصل في CI.
+- لعب جماعي LAN: `scripts/net.gd` (اتصال، اكتشاف، لقطات، مدخلات، طلقات، صناديق)، `scripts/net_avatar.gd` (جسم اللاعب البعيد عند المستضيف). `game.gd`: `is_playing()` بقى معناها «الماتش شغال» (المستضيف بيكمل بعد موته) و`player_active()` معناها اللاعب المحلي عايش. الجنود بيستهدفوا اللاعبين البعيدين كمان.
+- الأذونات: INTERNET وACCESS_NETWORK_STATE وACCESS_WIFI_STATE وCHANGE_WIFI_MULTICAST_STATE (للـ LAN فقط، من غير سيرفر خارجي).
+- `version/code` = 7، `config/version` = 0.7.0.
+
 ## Changelog v0.6.0
 - اكتظاظ الدايرة الأخيرة: مواقع على حلقتين + حجز خانات الملاحة + ابتعاد أقوى (`scripts/nav.gd`, `scripts/enemy.gd`).
 - بحث عن غطا وتلصّص: `scripts/cover.gd` + حالة COVER (اختباء / تلقيم / طلّة وضرب).

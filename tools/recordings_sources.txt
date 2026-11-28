@@ -1,0 +1,10 @@
+# freesound id  HQ preview url  sound page  (all Creative Commons 0 — checked on each page 2026-11-28)
+865993 https://cdn.freesound.org/previews/865/865993_19132311-hq.ogg https://freesound.org/people/db465/sounds/865993/
+450852 https://cdn.freesound.org/previews/450/450852_612689-hq.ogg https://freesound.org/people/kyles/sounds/450852/
+802675 https://cdn.freesound.org/previews/802/802675_4835746-hq.ogg https://freesound.org/people/Walking.With.Microphones/sounds/802675/
+683186 https://cdn.freesound.org/previews/683/683186_3692246-hq.ogg https://freesound.org/people/Shark_Anthony/sounds/683186/
+258198 https://cdn.freesound.org/previews/258/258198_4675419-hq.ogg https://freesound.org/people/wadaltmon/sounds/258198/
+209769 https://cdn.freesound.org/previews/209/209769_2012390-hq.ogg https://freesound.org/people/Johnnyfarmer/sounds/209769/
+384082 https://cdn.freesound.org/previews/384/384082_6892116-hq.ogg https://freesound.org/people/savataivanov/sounds/384082/
+112296 https://cdn.freesound.org/previews/112/112296_1330135-hq.ogg https://freesound.org/people/slugzilla/sounds/112296/
+531015 https://cdn.freesound.org/previews/531/531015_9818404-hq.ogg https://freesound.org/people/Noted451/sounds/531015/

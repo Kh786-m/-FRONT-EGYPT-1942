@@ -2,8 +2,9 @@ extends Node
 ## HARAQ audio: pooled 2D/3D players for weapon, hit, footstep and UI sounds, looping desert wind
 ## and sea ambience, distant artillery, and the zone burn loop, plus a menu theme and a tense
 ## in-match music loop. Buses: Master (overall volume + mute) -> Music and SFX (own sliders).
-## Music ducks under nearby gunfire and explosions. Settings are saved to user://settings.cfg. All sounds are procedurally generated (see
-## tools/gen_audio.py and assets/audio/CREDITS.md).
+## Music ducks under nearby gunfire and explosions. Settings are saved to user://settings.cfg. Weapons, explosion, footsteps, wind and surf are
+## CC0 field recordings (tools/import_recordings.py); the rest and the music are procedural
+## (tools/gen_audio.py). Sources and licenses: assets/audio/CREDITS.md.
 
 const SETTINGS_PATH := "user://settings.cfg"
 const DIR := "res://assets/audio/"

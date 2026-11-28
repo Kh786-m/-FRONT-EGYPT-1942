@@ -229,3 +229,42 @@ func _death_checks() -> void:
 	check(hips0 > 0.6 and hips1 < 0.35, "animated fall: hips %.2f -> %.2f m (no gore, just a fall)" % [hips0, hips1])
 	await get_tree().create_timer(Rig.CORPSE_TIME - 1.0).timeout
 	check(not is_instance_valid(r), "corpse sinks into the sand and is freed")
+
+# ------------------------------------------------------------------ recorded audio
+const RECORDED := ["shot_webley", "shot_enfield", "shot_thompson", "shot_mp40", "shot_enemy", "explosion", "step", "wind_loop", "sea_loop"]
+
+func _audio_checks() -> void:
+	var credits := FileAccess.get_file_as_string("res://assets/audio/CREDITS.md")
+	var missing := []
+	var big := []
+	var bad_len := []
+	for n in RECORDED:
+		var path := "res://assets/audio/%s.ogg" % n
+		var st = load(path)
+		if st == null:
+			missing.append(n)
+			continue
+		var f := FileAccess.open(path, FileAccess.READ)
+		var kb := f.get_length() / 1024.0
+		var limit := 80.0 if n.ends_with("_loop") else 24.0
+		if kb > limit:
+			big.append("%s %.0fKB" % [n, kb])
+		var l: float = st.get_length()
+		if (n.ends_with("_loop") and l < 10.0) or (not n.ends_with("_loop") and (l < 0.2 or l > 6.0)):
+			bad_len.append("%s %.1fs" % [n, l])
+		if not credits.contains(n + ".ogg"):
+			missing.append(n + " (credits)")
+	check(missing.is_empty(), "every recorded sound loads and is credited %s" % [missing])
+	check(big.is_empty(), "recorded files stay small (shots < 24 KB, loops < 80 KB) %s" % [big])
+	check(bad_len.is_empty(), "sane lengths (one-shots 0.2–6 s, loops >= 10 s) %s" % [bad_len])
+	var urls := 0
+	for line in credits.split("\n"):
+		if line.contains("https://freesound.org/people/") and line.contains("CC0 1.0"):
+			urls += 1
+	check(urls >= RECORDED.size(), "CREDITS.md lists a source URL + CC0 license per recording (%d)" % urls)
+	check(not credits.contains("No third-party recordings are used"), "old 'no recordings' claim removed from credits")
+	var a = game.audio
+	check(a != null and a.streams.has("shot_enfield") and a.streams.has("wind_loop"), "audio system loaded the recorded streams")
+	check(a.wind != null and a.wind.stream != null and a.wind.stream.loop, "wind recording loops")
+	check(a.sea != null and a.sea.stream != null and a.sea.stream.loop, "surf recording loops")
+	check(a.music_streams.has("music_menu") and a.music_streams.has("music_battle"), "procedural music kept")

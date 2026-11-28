@@ -121,7 +121,15 @@ def clunk(freq=900, dur=0.08, tau=0.02):
     return (tone + band(noise(dur), 600, 5000) * 0.6) * env_exp(dur, tau, 0.0005)
 
 
+# Since v0.7 these are CC0 recordings (tools/import_recordings.py); keep them unless forced.
+RECORDED = {"shot_webley", "shot_enfield", "shot_thompson", "shot_mp40", "shot_enemy", "explosion", "step", "wind_loop", "sea_loop"}
+FORCE_SYNTH = False
+
+
 def write(name, x, quality=3, loop_fade=0.0):
+    if name in RECORDED and not FORCE_SYNTH and os.environ.get("HARAQ_IMPORTING") != "1":
+        print(f"{name:16s} kept (recorded, see import_recordings.py; --synthetic to overwrite)")
+        return
     x = np.asarray(x, dtype=np.float64)
     if loop_fade > 0:
         # Seamless loop: crossfade the tail into the head.
@@ -464,6 +472,7 @@ def music():
 
 if __name__ == "__main__":
     import sys
+    FORCE_SYNTH = "--synthetic" in sys.argv
     if "--music-only" not in sys.argv:
         main()
     music()

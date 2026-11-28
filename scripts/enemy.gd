@@ -9,6 +9,7 @@ const G := preload("res://scripts/graphics.gd")
 const Fx := preload("res://scripts/fx.gd")
 const Weapons := preload("res://scripts/weapons.gd")
 const Audio := preload("res://scripts/audio.gd")
+const Rig := preload("res://scripts/soldier_rig.gd")
 ## Soldier-side weapon stats. dmg_player is per hit on the player; dmg_soldier on other soldiers.
 const WEAPONS := {
 	"webley": {"interval": 1.1, "dmg_player": 5.0, "dmg_soldier": 24.0, "range": 15.0, "hit": 0.5, "mag": 6, "reload": 2.2, "tier": 0},
@@ -52,8 +53,10 @@ var _los_timer := 0.0
 var _can_see := false
 var _muzzle: OmniLight3D
 var _flash_mesh: MeshInstance3D
+## Skeleton3D-rigged body with AnimationTree (scripts/soldier_rig.gd).
 var _body: Node3D
-var _legs: Array[Node3D] = []
+var rig_variant := 0
+var _anim_speed := 0.0
 var _walk_phase := 0.0
 var _path := PackedVector3Array()
 var _path_i := 0
@@ -119,10 +122,10 @@ func setup(p_game: Node3D, p_origin: Vector3, p_axis: Vector3, p_phase: float, u
 	_muzzle.omni_range = 3.5
 	_muzzle.shadow_enabled = false
 	_muzzle.position = MUZZLE_POS
-	add_child(_muzzle)
+	_body.muzzle_holder.add_child(_muzzle)
 	_flash_mesh = Fx.flash_mesh(0.22)
 	_flash_mesh.position = MUZZLE_POS
-	add_child(_flash_mesh)
+	_body.muzzle_holder.add_child(_flash_mesh)
 	_muzzle.visible = false
 
 
@@ -152,72 +155,24 @@ static func _box(size: Vector3) -> BoxMesh:
 	return b
 
 
-## Low-poly 1942 desert infantryman: tan tunic and trousers, webbing, flared steel helmet,
-## bolt-action rifle held at the ready. Legs swing while walking (see _animate).
-func _build_soldier(uniform: Material, helmet: Material, metal: Material) -> void:
-	_body = Node3D.new()
+## Rigged 1942 desert infantryman (Afrika Korps or 8th Army look, see soldier_rig.gd):
+## a Skeleton3D + one skinned mesh, animated by an AnimationTree (idle/walk/run, aim, fire,
+## reload, hit, death fall). The weapon sits on the rig's "weapon" bone.
+func _build_soldier(uniform: Material, helmet: Material, _metal: Material) -> void:
+	_body = Rig.new()
 	add_child(_body)
-	var skin := G.flat(Color(0.62, 0.45, 0.33), 0.8)
-	var leather := G.flat(Color(0.2, 0.15, 0.11), 0.6)
-	var webbing := G.flat(Color(0.42, 0.37, 0.27), 0.95)
-	var wood := G.pbr("wood", Color(1.1, 0.85, 0.65), 3.0, true, 0.6, 0.0, 0.5, false)
-	for side in [-1.0, 1.0]:
-		var hip := Node3D.new()
-		hip.position = Vector3(side * 0.11, 0.92, 0)
-		_body.add_child(hip)
-		_mesh(hip, _capsule(0.085, 0.86), Vector3(0, -0.42, 0), uniform)
-		_mesh(hip, _box(Vector3(0.12, 0.13, 0.26)), Vector3(0, -0.86, -0.04), leather)
-		_mesh(hip, _box(Vector3(0.13, 0.12, 0.14)), Vector3(0, -0.72, 0.0), webbing)
-		_legs.append(hip)
-	_mesh(_body, _box(Vector3(0.38, 0.11, 0.24)), Vector3(0, 0.96, 0), leather)
-	_mesh(_body, _capsule(0.2, 0.66), Vector3(0, 1.26, 0), uniform, Vector3.ZERO, Vector3(1.0, 1.0, 0.68))
-	for side in [-1.0, 1.0]:
-		_mesh(_body, _box(Vector3(0.045, 0.5, 0.02)), Vector3(side * 0.09, 1.25, -0.14), webbing, Vector3(0, 0, side * 0.25))
-		_mesh(_body, _box(Vector3(0.09, 0.1, 0.06)), Vector3(side * 0.12, 0.98, -0.14), webbing)
-	_mesh(_body, _box(Vector3(0.26, 0.28, 0.12)), Vector3(0, 1.28, 0.17), webbing)
-	_mesh(_body, _capsule(0.05, 0.14), Vector3(0, 1.53, 0), skin)
-	var head := SphereMesh.new()
-	head.radius = 0.105
-	head.height = 0.23
-	head.radial_segments = 12
-	head.rings = 6
-	_mesh(_body, head, Vector3(0, 1.64, -0.01), skin)
-	var dome := SphereMesh.new()
-	dome.radius = 0.145
-	dome.height = 0.15
-	dome.is_hemisphere = true
-	dome.radial_segments = 14
-	dome.rings = 4
-	_mesh(_body, dome, Vector3(0, 1.68, 0), helmet)
-	var skirt := CylinderMesh.new()
-	skirt.top_radius = 0.145
-	skirt.bottom_radius = 0.172
-	skirt.height = 0.07
-	skirt.radial_segments = 14
-	skirt.rings = 1
-	skirt.cap_top = false
-	_mesh(_body, skirt, Vector3(0, 1.655, 0.01), helmet)
-	# Arms holding the rifle in a low-ready.
-	_mesh(_body, _capsule(0.065, 0.42), Vector3(0.24, 1.25, -0.06), uniform, Vector3(0.5, 0, 0.18))
-	_mesh(_body, _capsule(0.06, 0.38), Vector3(0.2, 1.1, -0.28), uniform, Vector3(1.35, 0, 0.0))
-	_mesh(_body, _capsule(0.065, 0.42), Vector3(-0.24, 1.27, -0.12), uniform, Vector3(0.75, 0, -0.25))
-	_mesh(_body, _capsule(0.06, 0.4), Vector3(-0.08, 1.16, -0.38), uniform, Vector3(1.45, -0.6, 0.0))
-	_mesh(_body, _box(Vector3(0.08, 0.08, 0.1)), Vector3(0.17, 1.1, -0.44), skin)
-	_mesh(_body, _box(Vector3(0.08, 0.08, 0.1)), Vector3(0.05, 1.16, -0.56), skin)
-	_gun_holder = Node3D.new()
-	_gun_holder.position = Vector3(0.12, 1.17, -0.3)
-	_gun_holder.rotation = Vector3(0.03, 0.12, 0)
-	_body.add_child(_gun_holder)
+	_body.build(rig_variant, uniform, helmet)
+	_gun_holder = _body.gun_holder
 
 
 func _animate(delta: float, speed: float) -> void:
-	var amount := clampf(speed / CHASE_SPEED, 0.0, 1.0)
-	_walk_phase += delta * (2.0 + speed * 2.2)
-	var swing := sin(_walk_phase) * 0.55 * amount
-	if _legs.size() == 2:
-		_legs[0].rotation.x = swing
-		_legs[1].rotation.x = -swing
-	_body.position.y = absf(cos(_walk_phase)) * 0.04 * amount
+	# Drive the AnimationTree from the real ground speed and the AI state.
+	var hv := Vector2(velocity.x, velocity.z).length()
+	_anim_speed = move_toward(_anim_speed, minf(hv, speed if speed > 0.0 else hv), delta * 10.0)
+	var aiming := state == State.ATTACK or (state == State.COVER and _cover_phase == 2 and _peek_aimed)
+	_body.set_motion(_anim_speed, aiming)
+	var amount := clampf(_anim_speed / CHASE_SPEED, 0.0, 1.0)
+	_walk_phase += delta * (2.0 + _anim_speed * 2.2)
 	# Footsteps (only audible close by; throttled by the walk cycle).
 	if amount > 0.15 and game != null and game.audio != null:
 		var step := floorf(_walk_phase / PI)
@@ -246,6 +201,7 @@ func take_hit_from(damage: float, attacker: Node3D) -> bool:
 		death_cause = "player" if game != null and attacker == game.player else "enemy"
 		_die(death_cause == "player")
 		return true
+	_body.hit()
 	return false
 
 
@@ -269,6 +225,8 @@ func _die(by_player: bool) -> void:
 			game.cover.release(self)
 	if is_inside_tree() and get_parent() != null:
 		Fx.death_puff(get_parent(), global_position, 1.0)
+		# The body plays its fall animation on its own after this soldier is gone.
+		_body.die(get_parent())
 	died.emit(self, by_player)
 	queue_free()
 
@@ -299,10 +257,16 @@ func equip(id: String) -> void:
 			_gun_holder.remove_child(c)
 			c.queue_free()
 		Weapons.build_model(id, _gun_holder, 1.0, true)
+		_body.align_weapon(Weapons.DATA[id].get("grip", Vector3.ZERO))
 		var m: Vector3 = Weapons.DATA[id].get("muzzle", Vector3(0, 0, -0.6))
 		var mp := _gun_holder.position + _gun_holder.basis * m
 		_muzzle.position = mp
 		_flash_mesh.position = mp
+
+
+func _start_reload() -> void:
+	_reload_timer = float(WEAPONS[weapon]["reload"])
+	_body.reload(_reload_timer)
 
 
 func weapon_tier() -> int:
@@ -582,7 +546,7 @@ func _cover_step(delta: float, has_target: bool, tpos: Vector3, dist: float) -> 
 				_cover_phase = 1
 				_cover_timer = maxf(_reload_timer, 0.0) + randf_range(0.8, 1.6)
 				if _mag < int(WEAPONS[weapon]["mag"]) and _reload_timer <= 0.0:
-					_reload_timer = float(WEAPONS[weapon]["reload"])
+					_start_reload()
 					_cover_timer += _reload_timer
 				return [Vector3.ZERO, 0.0]
 			return [_steer_to(_cover_point), CHASE_SPEED]
@@ -779,7 +743,7 @@ func _shoot(dist: float) -> void:
 	if _reload_timer > 0.0 or not _valid(target):
 		return
 	if _mag <= 0:
-		_reload_timer = float(WEAPONS[weapon]["reload"])
+		_start_reload()
 		return
 	var w: Dictionary = WEAPONS[weapon]
 	_mag -= 1
@@ -787,6 +751,7 @@ func _shoot(dist: float) -> void:
 	_muzzle.light_energy = 4.0
 	_muzzle.visible = true
 	_flash_mesh.rotation.z = randf() * TAU
+	_body.fire()
 	shots_fired += 1
 	if game.audio:
 		game.audio.play_at("shot_enemy" if weapon == "lee_enfield" else Audio.SHOT.get(weapon, "shot_enemy"), global_position + Vector3(0, 1.3, 0), -1.0, 0.08)

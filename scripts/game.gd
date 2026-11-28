@@ -765,6 +765,7 @@ func _create_enemies() -> void:
 		enemy.name = "Enemy%d" % i
 		add_child(enemy)
 		enemy.position = p
+		enemy.rig_variant = i % 2
 		enemy.setup(self, p, Vector3(1, 0, 0) if i % 2 == 0 else Vector3(0, 0, 1), float(i) * 0.9, uniform, helmet, metal, ember_mat)
 		enemy.callsign = CALLSIGNS[i % CALLSIGNS.size()]
 		enemy.equip("webley" if i % 4 == 3 else "lee_enfield")

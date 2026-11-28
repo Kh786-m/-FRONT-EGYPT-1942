@@ -4,6 +4,8 @@ Egyptian WWII campaign shooter (Godot 4.3, mobile-first, GL Compatibility).
 Hero: **خالد كارم عبداللا** — a desert guide from Alexandria in the El Alamein summer & autumn of 1942.
 
 ## Run
+The game opens on the campaign menu. From there you can play the story missions or launch the **v0.6 battle-royale** mode (shrinking zone, loot, WW2 weapons, last one standing). Details: [README_AR.md](README_AR.md). Android APK: [README_BUILD_ON_PHONE_AR.md](README_BUILD_ON_PHONE_AR.md). Optional Play-ready signing: [RELEASE_SIGNING_AR.md](RELEASE_SIGNING_AR.md).
+
 1. Install Godot 4.3 → Import → pick `project.godot` → Run (F5). Starts at the campaign menu.
 2. PC: WASD, mouse, Shift run, Space jump, LMB fire, RMB aim, R reload, Esc pause.
    Phone: on-screen stick, drag to look, FIRE / AIM / RELOAD / RUN / JUMP.

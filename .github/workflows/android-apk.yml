@@ -1,63 +1,163 @@
-name: Build Godot 3D Android APK
+name: Build Android APK (debug + optional signed release)
+
 on:
-  workflow_dispatch:
   push:
     branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+  GODOT_RELEASE: "4.3-stable"
+
 jobs:
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
       contents: read
+    env:
+      # Optional release signing: set these repository secrets to also build a signed release APK.
+      # Without them the workflow keeps producing only the debug APK.
+      HAS_RELEASE_KEY: ${{ secrets.HARAQ_KEYSTORE_BASE64 != '' && secrets.HARAQ_KEYSTORE_PASSWORD != '' && secrets.HARAQ_KEY_ALIAS != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Godot 4.3 and Android export templates
+      - uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools build-tools;34.0.0 platforms;android-34"
+
+      - name: Install Godot 4.3 and export templates
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y unzip wget
-          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
-          unzip -q Godot_v4.3-stable_linux.x86_64.zip
-          sudo mv Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
-          chmod +x /usr/local/bin/godot
-          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
-          mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
-          unzip -q Godot_v4.3-stable_export_templates.tpz -d /tmp/godot-templates
-          cp /tmp/godot-templates/templates/* "$HOME/.local/share/godot/export_templates/4.3.stable/"
-      - name: Smoke test (headless, QA bot plays both missions)
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          wget -q "${BASE}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q "Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          wget -q "${BASE}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q "Godot_v${GODOT_RELEASE}_export_templates.tpz" -d /tmp/godot-templates
+          TPL="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$TPL"
+          cp /tmp/godot-templates/templates/* "$TPL/"
+          godot --version
+
+      - name: Configure Godot editor settings for Android
         shell: bash
         run: |
           set -euo pipefail
-          godot --headless --path . --editor --quit || true
+          mkdir -p "$HOME/.config/godot"
+          {
+            echo '[gd_resource type="EditorSettings" format=3]'
+            echo ''
+            echo '[resource]'
+            echo "export/android/android_sdk_path = \"${ANDROID_HOME}\""
+            echo "export/android/java_sdk_path = \"${JAVA_HOME}\""
+          } > "$HOME/.config/godot/editor_settings-${GODOT_VERSION}.tres"
+          cat "$HOME/.config/godot/editor_settings-${GODOT_VERSION}.tres"
+
+      - name: Generate debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Import project
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path . --import
+
+      - name: Smoke test (campaign missions + v0.6 battle royale)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Campaign menu: load only
+          out=$(godot --headless --path . scenes/main_menu.tscn --fixed-fps 30 --quit-after 120 2>&1 || true)
+          echo "$out" | grep -E "SCRIPT ERROR|ERROR: Failed" || true
+          if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in main_menu"; exit 1; fi
+          # Campaign missions: QA bot playthrough
           for scene in scenes/missions/m01_alamein_outpost.tscn scenes/maps/m02_alexandria_harbor.tscn; do
             out=$(godot --headless --path . "$scene" --fixed-fps 30 --quit-after 5400 -- --qa-bot --report 2>&1 || true)
             echo "$out" | grep -E "REPORT|SCRIPT ERROR" || true
             if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in $scene"; exit 1; fi
             grep -q "over=true" <<<"$out" || { echo "Mission did not finish: $scene"; exit 1; }
           done
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Set Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Prepare Android debug signing
-        run: |
-          mkdir -p "$HOME/.android"
-          keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-      - name: Import and export game
+          # v0.6 harness (scripts expect to sit at the project root — see tools/tests/README.txt)
+          cp tools/tests/test_v6.gd tools/tests/test_v6.tscn .
+          set +e
+          out=$(godot --headless --path . res://test_v6.tscn --fixed-fps 30 2>&1)
+          rc=$?
+          set -e
+          rm -f test_v6.gd test_v6.tscn
+          echo "$out" | grep -E "PASS |FAIL |RESULT|SCRIPT ERROR" || true
+          if grep -q "SCRIPT ERROR" <<<"$out"; then echo "Script error in test_v6"; exit 1; fi
+          grep -q "fails=0" <<<"$out" || { echo "test_v6 failed"; exit 1; }
+          test "$rc" -eq 0
+
+      - name: Export debug APK
+        shell: bash
         env:
-          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/debug.keystore
           GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
           GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
         run: |
-          cp "$HOME/.android/debug.keystore" debug.keystore
-          godot --headless --path . --editor --quit
+          set -euo pipefail
           mkdir -p build
-          godot --headless --path . --export-debug Android build/WAR_FRONT_EGYPT_1942_debug.apk
-      - uses: actions/upload-artifact@v4
+          godot --headless --path . --export-debug "Android" build/haraq-debug.apk
+          ls -la build
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
         with:
-          name: WAR_FRONT_EGYPT_1942_Godot3D_APK
-          path: build/WAR_FRONT_EGYPT_1942_debug.apk
+          name: haraq-debug-apk
+          path: build/haraq-debug.apk
           if-no-files-found: error
+
+      - name: Decode release keystore (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.HARAQ_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          ls -la "$RUNNER_TEMP/release.keystore"
+
+      - name: Export signed release APK (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        shell: bash
+        env:
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ runner.temp }}/release.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: ${{ secrets.HARAQ_KEY_ALIAS }}
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: ${{ secrets.HARAQ_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          godot --headless --path . --export-release "Android" build/haraq-release.apk
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs build/haraq-release.apk | head -5
+          rm -f "$RUNNER_TEMP/release.keystore"
+          ls -la build
+
+      - name: Upload release APK (optional)
+        if: env.HAS_RELEASE_KEY == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: haraq-release-apk
+          path: build/haraq-release.apk
+          if-no-files-found: error
+
+      - name: Release signing status
+        if: env.HAS_RELEASE_KEY != 'true'
+        run: echo "No HARAQ_KEYSTORE_* secrets set — built the debug APK only (see RELEASE_SIGNING_AR.md)."

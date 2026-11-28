@@ -73,6 +73,12 @@ func _build_ui() -> void:
 	info.text = "XP %d   •   COINS %d" % [Campaign.total_xp, Campaign.total_coins]
 	info.add_theme_font_size_override("font_size", 18)
 	v.add_child(info)
+	var br := Button.new()
+	br.custom_minimum_size = Vector2(480, 64)
+	br.add_theme_font_size_override("font_size", 22)
+	br.text = "  باتل رويال v0.6  |  BATTLE ROYALE"
+	br.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/main.tscn"))
+	v.add_child(br)
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(500, 470)
 	v.add_child(scroll)
